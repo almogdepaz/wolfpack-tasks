@@ -1075,7 +1075,7 @@ test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically repl
 		expect(messages).toEqual([{
 			message: {
 				customType: "pi-tasks-relay-loss",
-				content: "## task failed locally\ntask: `active-task`\n\nRelay state was lost; the remote outcome is unknown.",
+				content: expect.stringContaining("## task failed locally\ntask: `active-task`\n\nRelay state was lost; the remote outcome is unknown."),
 				display: true,
 				details: { taskId: "active-task", status: "failed", error: { code: "RELAY_STATE_LOST", message: "relay state was lost; remote outcome is unknown", retryable: false }, remoteOutcome: "unknown" },
 			},

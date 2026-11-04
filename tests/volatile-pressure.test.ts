@@ -13,7 +13,7 @@ import { TaskDeliveryStage } from "../src/task-protocol";
 const source = process.env.PI_TASKS_WOLFPACK_SOURCE;
 const revision = process.env.PI_TASKS_WOLFPACK_REVISION;
 
-for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-limited worker refresh fetches one page with ${historicalEvents} historical Pi events and full receipts`, async () => {
+for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-limited worker refresh drains multiple pages with ${historicalEvents} historical Pi events and collapsed receipts`, async () => {
   expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim()).toBe(revision!);
   expect(execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: source, encoding: "utf8" }).trim()).toBe("");
   const { WorkerRelayGateway } = await import(join(source!, "src/task-relay/worker-client.ts"));
@@ -61,10 +61,11 @@ for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-li
     if (historicalEvents === 0) {
       const beforeHeld = frames.length;
       await deliverTaskInbox(pi, receiver!, { isIdle: () => false, hasPendingMessages: () => true, sessionManager: history });
-      expect(frames.slice(beforeHeld).filter(frame => frame.operation === "receive")).toHaveLength(1);
-      expect(pages.at(-1).hasMore).toBe(true);
+      expect(frames.slice(beforeHeld).filter(frame => frame.operation === "receive").length).toBeGreaterThan(1);
+      expect(pages.at(-1).hasMore).toBe(false);
+      expect(stores[1]!.pendingRelayDeliveries(receiver!.endpoint)).toHaveLength(15);
       expect(stores[1]!.getReceiveCursor()).toBe("0");
-      pages.length = 0;
+      expect(frames.slice(beforeHeld).filter(frame => frame.operation === "acknowledge")).toHaveLength(0);
     }
     const before = frames.length, started = performance.now();
     await deliverTaskInbox(pi, receiver!, { isIdle: () => true, hasPendingMessages: () => false, sessionManager: history });
@@ -74,19 +75,20 @@ for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-li
       pages: pages.map(page => ({ length: page.deliveries.length, hasMore: page.hasMore, nextCursor: page.nextCursor })), historyEntries: history.getEntries().length }));
     expect(pages[0].deliveries.length).toBeLessThan(50);
     expect(pages[0].hasMore).toBe(true);
-    expect(inserted).toBe(pages[0].deliveries.length);
-    expect(inserted).toBeLessThan(15);
-    expect(cycle.filter(frame => frame.operation === "send").length).toBeLessThanOrEqual(64);
-    expect(cycle.filter(frame => frame.operation === "receive")).toHaveLength(1);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.flatMap(page => page.deliveries)).toHaveLength(15);
+    expect(pages.at(-1).hasMore).toBe(false);
+    expect(inserted).toBe(15);
+    expect(cycle.filter(frame => frame.operation === "send")).toHaveLength(15);
+    expect(cycle.filter(frame => frame.operation === "acknowledge")).toHaveLength(15);
+    expect(stores[1]!.pendingRelayDeliveries(receiver!.endpoint)).toHaveLength(0);
     const stages = new Map<string, string[]>();
     for (const frame of cycle.filter(frame => frame.operation === "send")) {
       const receipt = frame.envelope.payload.payload.payload;
       stages.set(receipt.eventId, [...(stages.get(receipt.eventId) ?? []), receipt.stage]);
     }
     expect(stages.size).toBe(inserted);
-    for (const recorded of stages.values()) expect(recorded.sort()).toEqual([
-      TaskDeliveryStage.receiverRecorded, TaskDeliveryStage.piInserted, TaskDeliveryStage.wakeRequested, TaskDeliveryStage.wakeAccepted,
-    ].sort());
+    for (const recorded of stages.values()) expect(recorded).toEqual([TaskDeliveryStage.wakeAccepted]);
     const reopened = SessionManager.open(history.getSessionFile()!);
     expect(reopened.getEntries()).toHaveLength(history.getEntries().length);
     if (historicalEvents === 0) {
@@ -94,13 +96,11 @@ for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-li
       await deliverTaskInbox(pi, receiver!, { isIdle: () => false, hasPendingMessages: () => true, sessionManager: history });
       expect(frames.slice(heldBefore).filter(frame => frame.operation === "receive")).toHaveLength(1);
       expect(stores[1]!.getReceiveCursor()).toBe(cursor);
-      for (let i = 0; i < 2; i++) {
-        const start = frames.length;
-        await deliverTaskInbox(pi, receiver!, { isIdle: () => true, hasPendingMessages: () => false, sessionManager: history });
-        expect(frames.slice(start).filter(frame => frame.operation === "receive")).toHaveLength(1);
-      }
+      const idleStart = frames.length;
+      await deliverTaskInbox(pi, receiver!, { isIdle: () => true, hasPendingMessages: () => false, sessionManager: history });
+      expect(frames.slice(idleStart).filter(frame => frame.operation === "send" || frame.operation === "acknowledge")).toHaveLength(0);
       expect(history.getEntries().filter(entry => entry.type === "custom_message" && entry.customType === "pi-tasks-event")).toHaveLength(15);
-      // Exercise the full origin raw-receipt -> two canonical copies -> archive/ACK path too.
+      // Receipts are canonicalized only at the origin, without fan-out, presentation or wake.
       const parentHistory = SessionManager.create(root, join(root, "parent-history"));
       const starter = history.getEntries().find(entry => entry.type === "message");
       if (starter?.type === "message" && starter.message.role === "assistant") parentHistory.appendMessage(starter.message);
@@ -108,19 +108,15 @@ for (const historicalEvents of [0, 1_000, 10_000]) test.skipIf(!source)(`byte-li
         sendMessage(message: any) { parentHistory.appendCustomMessageEntry(message.customType, message.content, message.display, message.details); },
         appendEntry(type: string, data: any) { parentHistory.appendCustomEntry(type, data); },
       };
-      for (let i = 0; i < 6; i++) {
-        await Bun.sleep(1_100);
-        const start = frames.length;
-        try { await deliverTaskInbox(parentPi, sender!, { isIdle: () => true, hasPendingMessages: () => false, sessionManager: parentHistory }); }
-        catch (error) { expect(error).toMatchObject({ code: "TASK_DELIVERY_DEFERRED" }); }
-        const current = frames.slice(start);
-        expect(current.filter(frame => frame.operation === "send").length).toBeLessThanOrEqual(64);
-        expect(current.filter(frame => frame.operation === "acknowledge").length).toBeLessThanOrEqual(48);
-        expect(current.filter(frame => frame.operation === "receive")).toHaveLength(1);
-        if (parentHistory.getEntries().filter(entry => entry.type === "custom" && entry.customType === "pi-tasks-event-record").length === 60) break;
+      const parentStart = frames.length;
+      await deliverTaskInbox(parentPi, sender!, { isIdle: () => true, hasPendingMessages: () => false, sessionManager: parentHistory });
+      const parentCycle = frames.slice(parentStart);
+      expect(parentCycle.filter(frame => frame.operation === "send")).toHaveLength(0);
+      expect(parentCycle.filter(frame => frame.operation === "acknowledge")).toHaveLength(15);
+      expect(parentHistory.getEntries().filter(entry => entry.type === "custom" || entry.type === "custom_message")).toHaveLength(0);
+      for (const task of sender!.listTasks()) {
+        expect(task.events.filter(event => event.type === "task.delivery_receipt").map(event => event.payload.stage)).toEqual([TaskDeliveryStage.wakeAccepted]);
       }
-      expect(parentHistory.getEntries().filter(entry => entry.type === "custom" && entry.customType === "pi-tasks-event-record")).toHaveLength(60);
-      expect(sender!.listTasks().every(task => task.events.filter(event => event.type === "task.delivery_receipt").length === 4)).toBe(true);
       expect(stores[0]!.outbox("pending")).toEqual([]);
       expect(SessionManager.open(parentHistory.getSessionFile()!).getEntries()).toHaveLength(parentHistory.getEntries().length);
       await Bun.sleep(1_100); // Refill the production token bucket between distinct fixture phases.

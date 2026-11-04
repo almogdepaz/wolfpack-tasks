@@ -94,6 +94,10 @@ The exact value `PI_TASK_WORKER=1` enables a fail-closed model tool gate. Before
 
 Workers cannot call `agent_task_send`, `agent_task_cancel`, or `agent_task_ack` (`PI_TASK_WORKER_COORDINATION_FORBIDDEN`). `agent_task_message` must name their eligible incorporated assignment. A structured session event alone is insufficient: its task must also be active in this endpoint's current RAM state. Old session history never authorizes work after restart.
 
+After confirmed relay loss discards active assignments, assignment-required denials keep the `PI_TASK_WORKER_ASSIGNMENT_REQUIRED` code as their prefix and add `RELAY_STATE_LOST`, up to 8 lost assignment IDs (JSON-quoted, each truncated after 128 characters, with additional IDs explicitly omitted), and parent recovery instructions. This bounded diagnostic comes only from the discarded lifetime's active tasks targeted to this worker, not session history; it survives failed fresh binding but is cleared on session replacement/shutdown. It is not authorization or a canonical task outcome. An ordinary unassigned worker still receives only the original denial code. Existing local-loss history records also include the recovery instructions, without a new wake.
+
+The parent/coordinator must independently verify work and side effects, obtain the worker's fresh `taskEndpoint` from structured Wolfpack session status, then send a new explicit assignment for the remaining scope. Do not replay the old task ID or infer a canonical remote outcome from local failure. The worker must wait for the fresh assignment; diagnostics never restore, replay, reassign or weaken the gate.
+
 Preflighting `agent_task_done` marks that task as closing before sibling calls are preflighted. Ordinary tools remain blocked for a closing, pending-terminal, accepted-terminal, or `delivery_blocked` task; an idempotent `agent_task_done` retry for that same assigned task remains allowed. Another independently active assignment can still authorize work.
 
 ## terminal delivery and acknowledgment

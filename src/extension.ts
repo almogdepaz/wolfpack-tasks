@@ -25,6 +25,9 @@ const TARGET_NOT_REGISTERED_CODE = "TARGET_NOT_REGISTERED";
 const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(["task.created", "task.reassigned"]);
 const RELAY_STATE_LOST_CODE = "RELAY_STATE_LOST";
 const RELAY_LOSS_CUSTOM_TYPE = "pi-tasks-relay-loss";
+const LOST_ASSIGNMENT_MAX_IDS = 8;
+const LOST_ASSIGNMENT_ID_MAX_CHARS = 128;
+const RELAY_LOSS_RECOVERY_GUIDANCE = "Parent/coordinator: independently verify work and side effects, obtain the worker's fresh taskEndpoint from structured Wolfpack session status, then send a new explicit assignment for the remaining scope. Do not replay the old task ID or infer a canonical outcome from local failure. Worker must wait for that assignment; old history does not authorize work.";
 const WAIT_BACKOFF_INITIAL_MS = 250;
 const WAIT_BACKOFF_MAX_MS = 2_000;
 const SUMMARY_MAX_CHARS = 1_200;
@@ -115,6 +118,12 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	const configuredCore: ConfiguredCoreFactory = ownedLoader ?? (async (): Promise<TaskCore> => core!);
 	let relayLossRecovery: Promise<void> | undefined;
 	let pendingRelayLossCount: number | undefined;
+	// Bounded diagnostic text from confirmed loss only; never consulted as authorization evidence.
+	let lostWorkerAssignmentDiagnostic: string | undefined;
+	const workerAssignmentDenial = (): { block: true; reason: string } => ({
+		block: true,
+		reason: lostWorkerAssignmentDiagnostic === undefined ? WORKER_GATE_DENIAL_CODE : `${WORKER_GATE_DENIAL_CODE}: ${lostWorkerAssignmentDiagnostic}`,
+	});
 	const refreshInbox = createSingleFlightInboxRefresh(async (signal) => {
 		const context = inboxContext;
 		const epoch = lifecycleEpoch;
@@ -261,6 +270,13 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 		const pending = (async (): Promise<void> => {
 			const recoveryEpoch = ++lifecycleEpoch;
 			const activeTasks = activeCore?.listTasks().filter((task) => task.status === "active") ?? [];
+			if (workerGateEnabled && activeCore) {
+				const lostAssignments = activeTasks.filter((task) => sameEndpoint(task.target, activeCore.endpoint));
+				if (lostAssignments.length > 0) {
+					const ids = lostAssignments.slice(0, LOST_ASSIGNMENT_MAX_IDS).map(({ taskId }) => JSON.stringify(taskId.length > LOST_ASSIGNMENT_ID_MAX_CHARS ? `${taskId.slice(0, LOST_ASSIGNMENT_ID_MAX_CHARS)}…` : taskId));
+					lostWorkerAssignmentDiagnostic = `${RELAY_STATE_LOST_CODE}; lost assignment IDs (at most ${LOST_ASSIGNMENT_MAX_IDS}, IDs truncated at ${LOST_ASSIGNMENT_ID_MAX_CHARS} chars): ${ids.join(", ")}${lostAssignments.length > ids.length ? "; additional IDs omitted" : ""}. The remote outcome is unknown. ${RELAY_LOSS_RECOVERY_GUIDANCE}`;
+				}
+			}
 			inboxContext = undefined;
 			cancelBackgroundRefresh();
 			await ownedLoader.close();
@@ -268,7 +284,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 			for (const task of activeTasks) {
 				pi.sendMessage({
 					customType: RELAY_LOSS_CUSTOM_TYPE,
-					content: `## task failed locally\ntask: \`${task.taskId}\`\n\nRelay state was lost; the remote outcome is unknown.`,
+					content: `## task failed locally\ntask: \`${task.taskId}\`\n\nRelay state was lost; the remote outcome is unknown.\n\n${RELAY_LOSS_RECOVERY_GUIDANCE}`,
 					display: true,
 					details: { taskId: task.taskId, status: "failed", error: { code: RELAY_STATE_LOST_CODE, message: "relay state was lost; remote outcome is unknown", retryable: false }, remoteOutcome: "unknown" },
 				}, { triggerTurn: false });
@@ -334,24 +350,25 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 			if (event.toolName === "agent_task_done") {
 				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
 				if (assigned === undefined || (!eligibleWorkerTask(assigned, closingTaskIds) && assigned.terminalDelivery.state === "not_submitted" && !closingTaskIds.has(assigned.taskId))) {
-					return { block: true, reason: WORKER_GATE_DENIAL_CODE };
+					return workerAssignmentDenial();
 				}
 				closingTaskIds.add(assigned.taskId);
 				return undefined;
 			}
 			if (event.toolName === "agent_task_message") {
 				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
-				return assigned !== undefined && eligibleWorkerTask(assigned, closingTaskIds) ? undefined : { block: true, reason: WORKER_GATE_DENIAL_CODE };
+				return assigned !== undefined && eligibleWorkerTask(assigned, closingTaskIds) ? undefined : workerAssignmentDenial();
 			}
 			if (assignments.some((task) => eligibleWorkerTask(task, closingTaskIds))) return undefined;
 		} catch {
 			// Authorization evidence unavailable or malformed: fail closed with the stable public reason.
 		}
-		return { block: true, reason: WORKER_GATE_DENIAL_CODE };
+		return workerAssignmentDenial();
 	});
 
 	pi.on("session_start", async (_event, context) => {
 		closingTaskIds.clear();
+		lostWorkerAssignmentDiagnostic = undefined;
 		const epoch = ++lifecycleEpoch;
 		await ownedLoader?.start();
 		if (epoch !== lifecycleEpoch) return;
@@ -373,6 +390,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	});
 	pi.on("session_shutdown", async () => {
 		closingTaskIds.clear();
+		lostWorkerAssignmentDiagnostic = undefined;
 		lifecycleEpoch += 1;
 		cancelBackgroundRefresh();
 		inboxContext = undefined;

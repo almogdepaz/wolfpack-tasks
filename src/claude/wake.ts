@@ -54,6 +54,8 @@ export interface WakeControllerOptions {
 
 export interface WakeController {
 	readonly mode: WakeMode;
+	/** True from a pointer request until `inboxCalled`. */
+	readonly pointerOutstanding: boolean;
 	/** Coalesced: at most one pointer is outstanding until `inboxCalled`. */
 	requestPointer(meta: Readonly<Record<string, string>>): void;
 	inboxCalled(): void;
@@ -117,6 +119,7 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 
 	return {
 		get mode() { return mode; },
+		get pointerOutstanding() { return outstanding !== undefined; },
 		requestPointer(meta) {
 			if (closed || outstanding) return;
 			const at = options.timers.now();

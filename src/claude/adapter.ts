@@ -125,7 +125,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 	let inboxQueue: Promise<unknown> = Promise.resolve();
 	const runInbox = (tool: AgentTaskToolDefinition, params: unknown, signal: AbortSignal): Promise<McpToolResult> => {
 		const run = inboxQueue.then(async (): Promise<McpToolResult> => {
-			const pointed = wake !== undefined;
+			const pointed = wake?.pointerOutstanding === true;
 			wake?.inboxCalled();
 			presenting = true;
 			try {

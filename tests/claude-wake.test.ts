@@ -43,10 +43,13 @@ test("fallback timing stays inside the relay wake deadline", () => {
 
 test("one channel pointer is outstanding until the inbox is called", async () => {
 	const f = fixture();
+	expect(f.wake.pointerOutstanding).toBe(false);
 	f.wake.requestPointer({ task_id: "t1", event_id: "e1" });
 	f.wake.requestPointer({ task_id: "t2", event_id: "e2" });
 	expect(f.channel).toEqual([{ task_id: "t1", event_id: "e1" }]);
+	expect(f.wake.pointerOutstanding).toBe(true);
 	f.wake.inboxCalled();
+	expect(f.wake.pointerOutstanding).toBe(false);
 	f.wake.requestPointer({ task_id: "t3", event_id: "e3" });
 	expect(f.channel).toHaveLength(2);
 	f.wake.close();

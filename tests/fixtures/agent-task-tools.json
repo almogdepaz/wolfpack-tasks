@@ -1,0 +1,248 @@
+{
+  "order": [
+    "on:tool_call",
+    "on:session_start",
+    "on:agent_end",
+    "on:agent_settled",
+    "on:turn_end",
+    "on:session_shutdown",
+    "tool:agent_task_send",
+    "tool:agent_task_status",
+    "tool:agent_task_wait",
+    "tool:agent_task_inbox",
+    "tool:agent_task_message",
+    "tool:agent_task_cancel",
+    "tool:agent_task_ack",
+    "tool:agent_task_done"
+  ],
+  "tools": {
+    "agent_task_send": {
+      "label": "Send Agent Task",
+      "description": "Create a task in this endpoint's RAM and submit its assignment; restart loses active state.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "to",
+          "task"
+        ],
+        "properties": {
+          "to": {
+            "type": "object",
+            "required": [
+              "relay",
+              "id"
+            ],
+            "properties": {
+              "relay": {
+                "type": "string",
+                "minLength": 1,
+                "description": "relay identifier"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "opaque endpoint identifier"
+              }
+            }
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 86400000
+          }
+        }
+      }
+    },
+    "agent_task_status": {
+      "label": "Task Status",
+      "description": "Read local endpoint-owned task state; status is unavailable while its origin is offline.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "agent_task_wait": {
+      "label": "Wait Agent Task",
+      "description": "Wait for a locally-known endpoint-owned task to reach a terminal state.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 86400000
+          }
+        }
+      }
+    },
+    "agent_task_inbox": {
+      "label": "Task Inbox",
+      "description": "Read local task records after processing relay deliveries without acknowledging task lifecycle.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "agent_task_message": {
+      "label": "Message Agent Task",
+      "description": "Record a message intent in this lifetime before relay submission.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId",
+          "type",
+          "message"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "question",
+              "answer",
+              "information"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        }
+      }
+    },
+    "agent_task_cancel": {
+      "label": "Cancel Agent Task",
+      "description": "Record cancellation in this lifetime before relay submission.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "agent_task_ack": {
+      "label": "Acknowledge Agent Task",
+      "description": "Record parent acknowledgement as an origin-owned logical event.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "agent_task_done": {
+      "label": "Complete Agent Task",
+      "description": "Record a terminal intent in this lifetime before relay submission.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "taskId",
+          "status",
+          "summary"
+        ],
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1200
+          },
+          "result": {
+            "type": "object",
+            "patternProperties": {
+              "^.*$": {}
+            }
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "artifact paths are receiver-project-relative regular files"
+                },
+                "mimeType": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

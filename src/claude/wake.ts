@@ -94,24 +94,36 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 		if (remaining > 0) { schedule(remaining); return; }
 		void nudge(pending);
 	};
+	/** Why a nudge for `pending` must not take its next terminal step, or undefined when it may. */
+	const fenced = (pending: Outstanding): string | undefined => {
+		if (closed) return "controller closed";
+		if (outstanding !== pending) return "pointer acknowledged";
+		return activity === "busy" ? "session busy" : undefined;
+	};
+	/** Status patches after an await: a closed controller writes nothing more. */
+	const report = (patch: WakeStatusPatch): void => { if (!closed) options.onChange(patch); };
 	const command = async (argv: readonly string[]): Promise<CommandResult> => options.runCommand(argv, { timeoutMs: timing.commandTimeoutMs });
 	const nudge = async (pending: Outstanding): Promise<void> => {
 		pending.nudging = true;
 		try {
 			const status = await command(["wolfpack", "session", "status", options.sessionId, "--json"]);
 			const reason = readyFailure(status, options.sessionId);
-			if (reason !== undefined) { options.onChange({ lastNudgeError: reason }); return; }
+			if (reason !== undefined) { report({ lastNudgeError: reason }); return; }
 			// Busy or acknowledged meanwhile: the next Stop hook re-arms the check.
-			if (closed || outstanding !== pending || activity === "busy") return;
+			if (fenced(pending) !== undefined) return;
 			pending.nudged = true;
 			const at = options.timers.now();
 			const paste = await command(["wolfpack", "session", "send", options.sessionId, CLAUDE_PLUGIN.pointer, "--json"]);
-			if (paste.exitCode !== 0) { options.onChange({ lastNudgeAt: at, lastNudgeError: `session send exited ${paste.exitCode}` }); return; }
-			if (mode === "channel") { mode = "fallback"; options.onChange({ wake: mode, fallbackAt: at }); }
+			if (paste.exitCode !== 0) { report({ lastNudgeAt: at, lastNudgeError: `session send exited ${paste.exitCode}` }); return; }
+			// The paste is out; the submit is a second terminal side effect and must not reach a session that changed meanwhile.
+			// The pointer text stays unsubmitted in the prompt input, the same best-effort residue as any appended nudge.
+			const fence = fenced(pending);
+			if (fence !== undefined) { report({ lastNudgeAt: at, lastNudgeError: `submit skipped: ${fence} during paste` }); return; }
+			if (mode === "channel") { mode = "fallback"; report({ wake: mode, fallbackAt: at }); }
 			const submit = await command(["wolfpack", "session", "send", options.sessionId, "\r", "--no-enter", "--json"]);
-			options.onChange(submit.exitCode === 0 ? { lastNudgeAt: at } : { lastNudgeAt: at, lastNudgeError: `session submit exited ${submit.exitCode}` });
+			report(submit.exitCode === 0 ? { lastNudgeAt: at } : { lastNudgeAt: at, lastNudgeError: `session submit exited ${submit.exitCode}` });
 		} catch (error) {
-			options.onChange({ lastNudgeError: error instanceof Error ? error.message : String(error) });
+			report({ lastNudgeError: error instanceof Error ? error.message : String(error) });
 		} finally {
 			pending.nudging = false;
 		}

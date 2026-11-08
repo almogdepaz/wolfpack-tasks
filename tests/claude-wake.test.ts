@@ -11,7 +11,11 @@ const STATUS = ["wolfpack", "session", "status", SESSION_ID, "--json"];
 const PASTE = ["wolfpack", "session", "send", SESSION_ID, CLAUDE_PLUGIN.pointer, "--json"];
 const SUBMIT = ["wolfpack", "session", "send", SESSION_ID, "\r", "--no-enter", "--json"];
 
-function fixture(status: string = READY) {
+type Runner = (argv: readonly string[]) => Promise<CommandResult>;
+
+const answer = (status: string): Runner => async (argv) => ({ exitCode: 0, stdout: argv[2] === "status" ? status : "{\"ok\":true}", stderr: "" });
+
+function fixture(status: string = READY, run: Runner = answer(status)) {
 	const vt = virtualTime();
 	const channel: Record<string, string>[] = [];
 	const commands: string[][] = [];
@@ -21,7 +25,7 @@ function fixture(status: string = READY) {
 		sendChannel(meta) { channel.push(meta); },
 		async runCommand(argv): Promise<CommandResult> {
 			commands.push([...argv]);
-			return { exitCode: 0, stdout: argv[2] === "status" ? status : "{\"ok\":true}", stderr: "" };
+			return run(argv);
 		},
 		timers: {
 			now: vt.now,
@@ -116,5 +120,36 @@ test.each([
 	expect(f.commands).toEqual([STATUS]);
 	expect(f.wake.mode).toBe("channel");
 	expect(f.patches.some((patch) => typeof patch.lastNudgeError === "string")).toBe(true);
+	f.wake.close();
+});
+
+/** Suspends the paste command until the test releases it, so lifecycle changes can land between paste and submit. */
+function suspendedPaste() {
+	let release!: () => void;
+	const pasted = new Promise<void>((resolve) => { release = resolve; });
+	const ready = answer(READY);
+	const run: Runner = async (argv) => {
+		if (argv[4] === CLAUDE_PLUGIN.pointer) await pasted;
+		return ready(argv);
+	};
+	return { run, release };
+}
+
+test.each([
+	["the session turns busy", (f: ReturnType<typeof fixture>) => f.wake.activity("busy")],
+	["the inbox is called", (f: ReturnType<typeof fixture>) => f.wake.inboxCalled()],
+	["the controller closes", (f: ReturnType<typeof fixture>) => f.wake.close()],
+])("no submit follows a paste during which %s", async (_label, change) => {
+	const paste = suspendedPaste();
+	const f = fixture(READY, paste.run);
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands).toEqual([STATUS, PASTE]);
+	change(f);
+	paste.release();
+	await f.vt.advance(5 * 60_000);
+	expect(f.commands).toEqual([STATUS, PASTE]);
+	// A fenced paste is not a completed nudge: the channel keeps its mode.
+	expect(f.wake.mode).toBe("channel");
 	f.wake.close();
 });

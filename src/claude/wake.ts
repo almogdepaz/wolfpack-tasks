@@ -12,9 +12,19 @@ export interface WakeTiming {
 	readonly settleMs: number;
 	/** Per wolfpack CLI command. */
 	readonly commandTimeoutMs: number;
+	/** Spacing between status checks for the same pointer after a failed or unreadable status. */
+	readonly statusRetryMs: number;
+	/** Status checks per pointer before its fallback is given up and the pointer is released. */
+	readonly statusAttempts: number;
 }
 
-export const DEFAULT_WAKE_TIMING: WakeTiming = Object.freeze({ channelGraceMs: 15_000, fallbackGraceMs: 2_000, settleMs: 3_000, commandTimeoutMs: 10_000 });
+export const DEFAULT_WAKE_TIMING: WakeTiming = Object.freeze({ channelGraceMs: 15_000, fallbackGraceMs: 2_000, settleMs: 3_000, commandTimeoutMs: 10_000, statusRetryMs: 5_000, statusAttempts: 3 });
+
+/**
+ * A nudged pointer that is still unanswered this long after its nudge is replaced by the next pointer request, so an
+ * uncertain or ignored nudge cannot hold later mail forever. It also bounds a repeated paste to one per period.
+ */
+export const NUDGED_POINTER_EXPIRY_MS = RELAY_WAKE_DEADLINE_MS;
 
 export type WakeMode = "channel" | "fallback";
 export type SessionActivity = "busy" | "idle";
@@ -41,6 +51,10 @@ export interface WakeStatusPatch {
 	readonly lastNudgeAt?: number;
 	readonly fallbackAt?: number;
 	readonly lastNudgeError?: string;
+	/** Failed status checks for the current pointer. */
+	readonly statusFailures?: number;
+	/** Set when a pointer's fallback was given up after its status retries; cleared by the next inbox call. */
+	readonly wakeStalledAt?: number | null;
 }
 
 export interface WakeControllerOptions {
@@ -65,14 +79,22 @@ export interface WakeController {
 
 interface Outstanding {
 	readonly at: number;
-	/** The once-per-pointer nudge ran its sends (successfully or not). */
+	/** The once-per-pointer nudge started its terminal sends (successfully or not). */
 	nudged: boolean;
+	nudgedAt?: number;
 	nudging: boolean;
+	statusFailures: number;
 }
 
 /**
  * Channel pointer plus the D6 fallback. Activity comes from Claude Code hooks: UserPromptSubmit and PreToolUse mean
  * busy, Stop means idle. A fresh session starts idle because no turn has begun. The fallback never runs while busy.
+ *
+ * Failure policy: a status check has no terminal side effect, so a failed, unreadable or not-ready status (or a runner
+ * error such as ENOENT) is retried for the same idle pointer up to `statusAttempts`; then the pointer is released and
+ * the next pointer request starts over. A paste or submit that fails, times out or throws is uncertain: the text may
+ * already be in the prompt input. It is never repeated and never followed by a submit for that pointer; the pointer
+ * expires `NUDGED_POINTER_EXPIRY_MS` after the nudge.
  */
 export function createWakeController(options: WakeControllerOptions): WakeController {
 	const timing = options.timing ?? DEFAULT_WAKE_TIMING;
@@ -103,16 +125,32 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 	/** Status patches after an await: a closed controller writes nothing more. */
 	const report = (patch: WakeStatusPatch): void => { if (!closed) options.onChange(patch); };
 	const command = async (argv: readonly string[]): Promise<CommandResult> => options.runCommand(argv, { timeoutMs: timing.commandTimeoutMs });
+	const statusFailed = (pending: Outstanding, reason: string): void => {
+		pending.statusFailures++;
+		if (closed || outstanding !== pending) return;
+		if (pending.statusFailures < timing.statusAttempts) {
+			report({ lastNudgeError: reason, statusFailures: pending.statusFailures });
+			if (activity === "idle") schedule(timing.statusRetryMs);
+			return;
+		}
+		outstanding = undefined;
+		report({ lastNudgeError: `${reason}; fallback given up after ${pending.statusFailures} status checks`, statusFailures: pending.statusFailures, wakeStalledAt: options.timers.now() });
+	};
 	const nudge = async (pending: Outstanding): Promise<void> => {
 		pending.nudging = true;
 		try {
-			const status = await command(["wolfpack", "session", "status", options.sessionId, "--json"]);
-			const reason = readyFailure(status, options.sessionId);
-			if (reason !== undefined) { report({ lastNudgeError: reason }); return; }
+			let reason: string | undefined;
+			try {
+				reason = readyFailure(await command(["wolfpack", "session", "status", options.sessionId, "--json"]), options.sessionId);
+			} catch (error) {
+				reason = error instanceof Error ? error.message : String(error);
+			}
+			if (reason !== undefined) { statusFailed(pending, reason); return; }
 			// Busy or acknowledged meanwhile: the next Stop hook re-arms the check.
 			if (fenced(pending) !== undefined) return;
-			pending.nudged = true;
 			const at = options.timers.now();
+			pending.nudged = true;
+			pending.nudgedAt = at;
 			const paste = await command(["wolfpack", "session", "send", options.sessionId, CLAUDE_PLUGIN.pointer, "--json"]);
 			if (paste.exitCode !== 0) { report({ lastNudgeAt: at, lastNudgeError: `session send exited ${paste.exitCode}` }); return; }
 			// The paste is out; the submit is a second terminal side effect and must not reach a session that changed meanwhile.
@@ -133,18 +171,19 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 		get mode() { return mode; },
 		get pointerOutstanding() { return outstanding !== undefined; },
 		requestPointer(meta) {
-			if (closed || outstanding) return;
+			if (closed) return;
 			const at = options.timers.now();
-			outstanding = { at, nudged: false, nudging: false };
+			if (outstanding && !(outstanding.nudgedAt !== undefined && at - outstanding.nudgedAt >= NUDGED_POINTER_EXPIRY_MS)) return;
+			outstanding = { at, nudged: false, nudging: false, statusFailures: 0 };
 			if (mode === "channel") options.sendChannel(meta);
-			options.onChange({ lastPointerAt: at });
+			options.onChange({ lastPointerAt: at, statusFailures: 0 });
 			schedule(grace());
 		},
 		inboxCalled() {
 			outstanding = undefined;
 			cancelTimer?.();
 			cancelTimer = undefined;
-			if (!closed) options.onChange({ lastInboxAt: options.timers.now() });
+			if (!closed) options.onChange({ lastInboxAt: options.timers.now(), wakeStalledAt: null });
 		},
 		activity(state) {
 			activity = state;

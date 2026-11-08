@@ -40,8 +40,11 @@ function fixture(status: string = READY, run: Runner = answer(status)) {
 	return { vt, wake, channel, commands, patches };
 }
 
-test("fallback timing stays inside the relay wake deadline", () => {
-	const worst = DEFAULT_WAKE_TIMING.channelGraceMs + DEFAULT_WAKE_TIMING.settleMs + 3 * DEFAULT_WAKE_TIMING.commandTimeoutMs;
+test("fallback timing, including every status retry, stays inside the relay wake deadline", () => {
+	const t = DEFAULT_WAKE_TIMING;
+	expect(t.statusAttempts).toBeGreaterThan(1);
+	// Grace, the settle after a Stop hook, every status attempt timing out with its retry spacing, then paste and submit.
+	const worst = t.channelGraceMs + t.settleMs + t.statusAttempts * t.commandTimeoutMs + (t.statusAttempts - 1) * t.statusRetryMs + 2 * t.commandTimeoutMs;
 	expect(worst).toBeLessThan(RELAY_WAKE_DEADLINE_MS);
 });
 
@@ -113,11 +116,13 @@ test.each([
 	["a dead terminal", JSON.stringify({ ok: true, sessionId: SESSION_ID, state: "active", terminal: { exists: true, alive: false, status: "dead" } })],
 	["another session", JSON.stringify({ ok: true, sessionId: "other", state: "active", terminal: { exists: true, alive: true, status: "ready" } })],
 	["unparseable status", "not json"],
-])("%s is not nudged and keeps channel mode", async (_label, status) => {
+])("%s is not nudged, retried a bounded number of times, and keeps channel mode", async (_label, status) => {
 	const f = fixture(status);
 	f.wake.requestPointer({ task_id: "t1" });
 	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
 	expect(f.commands).toEqual([STATUS]);
+	await f.vt.advance(10 * 60_000);
+	expect(f.commands).toEqual(Array.from({ length: DEFAULT_WAKE_TIMING.statusAttempts }, () => STATUS));
 	expect(f.wake.mode).toBe("channel");
 	expect(f.patches.some((patch) => typeof patch.lastNudgeError === "string")).toBe(true);
 	f.wake.close();
@@ -151,5 +156,91 @@ test.each([
 	expect(f.commands).toEqual([STATUS, PASTE]);
 	// A fenced paste is not a completed nudge: the channel keeps its mode.
 	expect(f.wake.mode).toBe("channel");
+	f.wake.close();
+});
+
+/** Fails the first `failures` status commands with `fail`, then answers like a ready session. */
+function flakyStatus(failures: number, fail: () => Promise<CommandResult>): Runner {
+	const ready = answer(READY);
+	let left = failures;
+	return async (argv) => {
+		if (argv[2] === "status" && left > 0) { left--; return fail(); }
+		return ready(argv);
+	};
+}
+const unavailable = async (): Promise<CommandResult> => ({ exitCode: 1, stdout: "", stderr: "daemon unavailable" });
+const missingCli = async (): Promise<CommandResult> => { throw Object.assign(new Error("spawn wolfpack ENOENT"), { code: "ENOENT" }); };
+
+test.each([
+	["a failed status response", unavailable],
+	["a missing wolfpack CLI (ENOENT)", missingCli],
+])("%s is retried while the pointer is outstanding and the session idle, inside the relay deadline", async (_label, fail) => {
+	const f = fixture(READY, flakyStatus(1, fail));
+	const start = f.vt.now();
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands).toEqual([STATUS]);
+	expect(f.wake.pointerOutstanding).toBe(true);
+	await f.vt.advance(DEFAULT_WAKE_TIMING.statusRetryMs);
+	expect(f.commands).toEqual([STATUS, STATUS, PASTE, SUBMIT]);
+	expect(f.vt.now() - start).toBeLessThan(RELAY_WAKE_DEADLINE_MS);
+	expect(f.wake.mode).toBe("fallback");
+	expect(f.patches.some((patch) => patch.statusFailures === 1)).toBe(true);
+	f.wake.close();
+});
+
+test("a retry waits while the session is busy and resumes after the idle settle", async () => {
+	const f = fixture(READY, flakyStatus(1, unavailable));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	f.wake.activity("busy");
+	await f.vt.advance(5 * 60_000);
+	expect(f.commands).toEqual([STATUS]);
+	f.wake.activity("idle");
+	await f.vt.advance(DEFAULT_WAKE_TIMING.settleMs);
+	expect(f.commands).toEqual([STATUS, STATUS, PASTE, SUBMIT]);
+	f.wake.close();
+});
+
+test("exhausted status retries release the pointer, so later mail points again and can still be nudged", async () => {
+	const f = fixture(READY, flakyStatus(DEFAULT_WAKE_TIMING.statusAttempts, missingCli));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(10 * 60_000);
+	expect(f.commands).toHaveLength(DEFAULT_WAKE_TIMING.statusAttempts);
+	expect(f.wake.pointerOutstanding).toBe(false);
+	expect(f.patches.some((patch) => typeof patch.wakeStalledAt === "number")).toBe(true);
+
+	f.wake.requestPointer({ task_id: "t2" });
+	expect(f.channel).toEqual([{ task_id: "t1" }, { task_id: "t2" }]);
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands.slice(DEFAULT_WAKE_TIMING.statusAttempts)).toEqual([STATUS, PASTE, SUBMIT]);
+	f.wake.inboxCalled();
+	expect(f.patches.at(-1)).toMatchObject({ wakeStalledAt: null });
+	f.wake.close();
+});
+
+test.each([
+	["exits non-zero", async (): Promise<CommandResult> => ({ exitCode: 1, stdout: "", stderr: "" })],
+	["times out", async (): Promise<CommandResult> => { throw new Error("Command failed: wolfpack session send (timed out)"); }],
+])("a paste that %s is uncertain: no submit, no repeat for that pointer, and the pointer expires at the relay deadline", async (_label, failPaste) => {
+	const ready = answer(READY);
+	let pasteFails = true;
+	const f = fixture(READY, async (argv) => argv[4] === CLAUDE_PLUGIN.pointer && pasteFails ? failPaste() : ready(argv));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands).toEqual([STATUS, PASTE]);
+	f.wake.activity("idle");
+	await f.vt.advance(RELAY_WAKE_DEADLINE_MS - 1);
+	// Still the same pointer: coalesced, not re-pasted.
+	f.wake.requestPointer({ task_id: "t2" });
+	expect(f.channel).toHaveLength(1);
+	expect(f.commands).toEqual([STATUS, PASTE]);
+
+	pasteFails = false;
+	await f.vt.advance(1);
+	f.wake.requestPointer({ task_id: "t3" });
+	expect(f.channel).toEqual([{ task_id: "t1" }, { task_id: "t3" }]);
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands).toEqual([STATUS, PASTE, STATUS, PASTE, SUBMIT]);
 	f.wake.close();
 });

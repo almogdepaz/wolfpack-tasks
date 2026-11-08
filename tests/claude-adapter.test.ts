@@ -98,7 +98,7 @@ test("the status file records the wake mode and protocol version", async () => {
 	const { env } = await fixture();
 	const path = join(env.WOLFPACK_DIR!, "wolfpack-tasks", "claude", `${SESSION_ID}.json`);
 	const status = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-	expect(status).toMatchObject({ sessionId: SESSION_ID, sessionName: "claude-worker", wake: "channel", protocolVersion: "2025-11-25", clientProtocolVersion: "2025-11-25" });
+	expect(status).toMatchObject({ sessionId: SESSION_ID, sessionName: "claude-worker", wake: "channel", protocolVersion: "2025-11-25", clientProtocolVersion: "2025-11-25", statusFailures: 0, wakeStalledAt: null });
 	expect(typeof status.startedAt).toBe("number");
 	expect(statSync(path).mode & 0o777).toBe(0o600);
 });

@@ -153,7 +153,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			status = createStatusFile(environment.statusPath, {
 				sessionId: environment.sessionId, sessionName: environment.sessionName, pid: process.pid, wake: "channel",
 				protocolVersion: protocol.protocolVersion, clientProtocolVersion: protocol.clientProtocolVersion, startedAt: now,
-				lastPointerAt: null, lastInboxAt: null, lastNudgeAt: null, fallbackAt: null, lastNudgeError: null, lastStatus: null,
+				lastPointerAt: null, lastInboxAt: null, lastNudgeAt: null, fallbackAt: null, lastNudgeError: null, statusFailures: 0, wakeStalledAt: null, lastStatus: null,
 			}, options.timers.now, options.log);
 			wake = createWakeController({
 				sessionId: environment.sessionId,

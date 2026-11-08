@@ -22,6 +22,10 @@ export interface ClaudeStatus {
 	readonly lastNudgeAt: number | null;
 	readonly fallbackAt: number | null;
 	readonly lastNudgeError: string | null;
+	/** Failed wolfpack status checks for the current pointer; a positive value means the fallback is retrying. */
+	readonly statusFailures: number;
+	/** When a pointer's fallback was given up after its status retries; null after the next inbox call. */
+	readonly wakeStalledAt: number | null;
 	/** The runtime's last status-line text; null when clear. */
 	readonly lastStatus: string | null;
 }

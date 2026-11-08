@@ -34,10 +34,7 @@
           },
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/dist/worker-gate.mjs"
-            ],
+            "command": "if [ \"${WOLFPACK_TASK_WORKER:-}\" = 1 ] || [ \"${PI_TASK_WORKER:-}\" = 1 ]; then exec node \"${CLAUDE_PLUGIN_ROOT}/dist/worker-gate.mjs\"; fi; cat >/dev/null; exit 0",
             "onFailure": "block",
             "timeout": 10
           }

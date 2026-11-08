@@ -11,6 +11,14 @@ import type { JsonRpcMessage } from "../src/claude/json-rpc";
 import packageJson from "../package.json";
 
 const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
+const commandHooks = () => {
+	const hooks = (readJson(join(PLUGIN_ROOT, "hooks", "hooks.json")) as { hooks: Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]> }).hooks;
+	return Object.entries(hooks).flatMap(([event, groups]) => groups.flatMap((group) => group.hooks.filter((hook) => hook.type === "command").map((hook) => ({ event, matcher: group.matcher, hook }))));
+};
+// Claude Code runs a shell-form hook as `/bin/sh -c <command>` and exports CLAUDE_PLUGIN_ROOT; it does not substitute the
+// string. Outside worker sessions the guard drains the input without starting node: a hook that exits before reading its
+// input fails with EPIPE, which onFailure: "block" turns into a blocked tool call.
+const WORKER_GATE_HOOK_COMMAND = 'if [ "${WOLFPACK_TASK_WORKER:-}" = 1 ] || [ "${PI_TASK_WORKER:-}" = 1 ]; then exec node "${CLAUDE_PLUGIN_ROOT}/dist/worker-gate.mjs"; fi; cat >/dev/null; exit 0';
 const bundlePath = join(PLUGIN_ROOT, CLAUDE_PLUGIN.bundle);
 const gateBundlePath = join(PLUGIN_ROOT, CLAUDE_PLUGIN.gateBundle);
 
@@ -62,10 +70,8 @@ describe("claude plugin manifests", () => {
 		expect(hooks.PreToolUse![0]).toMatchObject({ matcher: "*", hooks: [{ input: { tool_name: "${tool_name}" } }, {}] });
 	});
 
-	test("PreToolUse also runs the fail-closed worker gate as a blocking exec-form command hook", () => {
-		const hooks = (readJson(join(PLUGIN_ROOT, "hooks", "hooks.json")) as { hooks: Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]> }).hooks;
-		const commands = Object.entries(hooks).flatMap(([event, groups]) => groups.flatMap((group) => group.hooks.filter((hook) => hook.type === "command").map((hook) => ({ event, matcher: group.matcher, hook }))));
-		expect(commands).toEqual([{ event: "PreToolUse", matcher: "*", hook: { type: "command", command: "node", args: [`\${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN.gateBundle}`], onFailure: "block", timeout: 10 } }]);
+	test("PreToolUse also runs the fail-closed worker gate as a blocking shell-form command hook with a worker guard", () => {
+		expect(commandHooks()).toEqual([{ event: "PreToolUse", matcher: "*", hook: { type: "command", command: WORKER_GATE_HOOK_COMMAND, onFailure: "block", timeout: 10 } }]);
 	});
 });
 
@@ -160,4 +166,67 @@ describe("worker gate bundle under node", () => {
 		expect(await run(workerEnv(stateDir), bash)).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 		expect(await run(workerEnv(mkdtempSync(join(tmpdir(), "wolfpack-gate-"))), JSON.stringify({ tool_name: `${CLAUDE_PLUGIN.toolPrefix}agent_task_inbox` }))).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 	}, 15_000);
+});
+
+// Runs a command the way Claude Code 2.1.319 runs a shell-form hook: `/bin/sh -c`, the hook input written to stdin and
+// then closed, with an EPIPE on stdin recorded (Claude Code turns it into a hook failure).
+const HOOK_RUNNER = `
+const { spawn } = require("node:child_process");
+const { command, env, toolName, inputBytes } = JSON.parse(process.argv[1]);
+const child = spawn("/bin/sh", ["-c", command], { env });
+let stdout = "", stderr = "", stdinError = null;
+child.stdout.on("data", (chunk) => { stdout += chunk; });
+child.stderr.on("data", (chunk) => { stderr += chunk; });
+child.stdin.on("error", (error) => { stdinError = error.code ?? String(error); });
+child.stdin.write(JSON.stringify({ tool_name: toolName, tool_input: { content: "x".repeat(inputBytes) } }) + "\\n");
+child.stdin.end();
+child.on("close", (code) => process.stdout.write(JSON.stringify({ code, stdout, stderr, stdinError })));
+`;
+
+describe("worker gate hook command under /bin/sh", () => {
+	const baseEnv = (): Record<string, string> => {
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !key.startsWith("WOLFPACK_") && key !== "PI_TASK_WORKER" && key !== "CLAUDE_PLUGIN_ROOT") env[key] = value;
+		return env;
+	};
+	// No node on this PATH: a guard that started node would exit 127 instead of 0.
+	const withoutNode = { PATH: "/usr/bin:/bin" };
+	const pluginRoot = { CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT };
+	const sessionId = "0b6f3a52-6a39-4c55-9a0e-1c2d3e4f5a6b";
+	const identity = (stateDir: string) => ({ WOLFPACK_SESSION_ID: sessionId, WOLFPACK_SESSION_NAME: "claude-worker", WOLFPACK_DIR: stateDir });
+	const hookCommand = () => commandHooks().map(({ hook }) => hook.command as string)[0]!;
+	const run = async (env: Record<string, string>, inputBytes = 300_000, toolName = "Write") => {
+		const child = Bun.spawn([node!, "-e", HOOK_RUNNER, JSON.stringify({ command: hookCommand(), env, toolName, inputBytes })], { stdout: "pipe", stderr: "pipe" });
+		const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		expect(exitCode).toBe(0);
+		return JSON.parse(stdout) as { code: number; stdout: string; stderr: string; stdinError: string | null };
+	};
+
+	test.skipIf(!node)("outside worker sessions it drains a large input and exits 0 without node or output", async () => {
+		expect(await run({ ...baseEnv(), ...withoutNode, ...pluginRoot })).toEqual({ code: 0, stdout: "", stderr: "", stdinError: null });
+		expect(await run({ ...baseEnv(), ...withoutNode })).toEqual({ code: 0, stdout: "", stderr: "", stdinError: null });
+		for (const value of ["0", "true", "1 ", ""]) {
+			expect(await run({ ...baseEnv(), ...withoutNode, ...pluginRoot, WOLFPACK_TASK_WORKER: value, PI_TASK_WORKER: value })).toEqual({ code: 0, stdout: "", stderr: "", stdinError: null });
+		}
+	}, 30_000);
+
+	test.skipIf(!node)("either worker variable set to 1 runs the gate script, which denies without gate state", async () => {
+		for (const variable of ["WOLFPACK_TASK_WORKER", "PI_TASK_WORKER"]) {
+			const result = await run({ ...baseEnv(), ...pluginRoot, ...identity(mkdtempSync(join(tmpdir(), "wolfpack-gate-"))), [variable]: "1" }, 200, "Bash");
+			expect(result.code).toBe(2);
+			expect(result.stdout).toBe("");
+			expect(result.stderr).toStartWith("PI_TASK_WORKER_ASSIGNMENT_REQUIRED");
+		}
+	}, 30_000);
+
+	test.skipIf(!node)("in a worker session a missing node or plugin root fails the hook instead of allowing", async () => {
+		const stateDir = mkdtempSync(join(tmpdir(), "wolfpack-gate-"));
+		expect((await run({ ...baseEnv(), ...withoutNode, ...pluginRoot, ...identity(stateDir), WOLFPACK_TASK_WORKER: "1" }, 200)).code).toBe(127);
+		expect([0, 2]).not.toContain((await run({ ...baseEnv(), ...identity(stateDir), WOLFPACK_TASK_WORKER: "1" }, 200)).code);
+	}, 30_000);
+
+	test.skipIf(!node)("the gate script drains a large input it allows without reading", async () => {
+		// A worker variable without wolfpack identity is the inactive mode: the script allows without parsing the input.
+		expect(await run({ ...baseEnv(), ...pluginRoot, WOLFPACK_TASK_WORKER: "1" })).toEqual({ code: 0, stdout: "", stderr: "", stdinError: null });
+	}, 30_000);
 });

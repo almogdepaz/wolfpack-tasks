@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { CLAUDE_PLUGIN } from "../src/claude/constants";
@@ -12,6 +12,7 @@ import { runTaskRelayConformance } from "../src/task-relay-conformance";
 import { WORKER_COORDINATION_FORBIDDEN_CODE, WORKER_GATE_DENIAL_CODE } from "../src/agent-task-runtime";
 import { SESSION_ID, sequence, startHarness, waitFor, wolfpackEnv } from "./claude-harness";
 import type { Harness } from "./claude-harness";
+import type { WakeTimers } from "../src/claude/wake";
 
 const META_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const noCommands = async (): Promise<never> => { throw new Error("unexpected command"); };
@@ -28,7 +29,7 @@ afterEach(async () => {
 	delete process.env.WOLFPACK_TASK_WORKER;
 });
 
-async function fixture(options: { worker?: boolean } = {}) {
+async function fixture(options: { worker?: boolean; timers?: WakeTimers } = {}) {
 	if (options.worker) process.env.WOLFPACK_TASK_WORKER = "1";
 	const relay = claudePathRelay();
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
@@ -36,7 +37,7 @@ async function fixture(options: { worker?: boolean } = {}) {
 	await origin.connect();
 	await worker.connect();
 	const env = wolfpackEnv();
-	const harness = startHarness({ env, core: worker, runCommand: noCommands });
+	const harness = startHarness({ env, core: worker, runCommand: noCommands, ...(options.timers && { timers: options.timers }) });
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
@@ -189,3 +190,76 @@ test("a buffered relay-loss note does not suppress the wake for a later assignme
 	expect(inbox).toContain(lost);
 	expect(inbox).toContain("assignment after the reset");
 });
+
+const gateState = (env: Record<string, string | undefined>): Record<string, unknown> | undefined => {
+	const path = join(env.WOLFPACK_DIR!, CLAUDE_PLUGIN.statusDirectory, `${SESSION_ID}${CLAUDE_PLUGIN.gateFileSuffix}`);
+	return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown> : undefined;
+};
+
+test("a worker server writes gate state before each tool result and revokes it on completion and shutdown", async () => {
+	const { origin, worker, harness, env } = await fixture({ worker: true });
+	expect(gateState(env)).toMatchObject({ sessionId: SESSION_ID, pid: process.pid, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
+	const path = join(env.WOLFPACK_DIR!, CLAUDE_PLUGIN.statusDirectory, `${SESSION_ID}${CLAUDE_PLUGIN.gateFileSuffix}`);
+	expect(statSync(path).mode & 0o777).toBe(0o600);
+
+	const taskId = await assign(origin, worker, harness, "gated assignment");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	const open = gateState(env)!;
+	expect(open).toMatchObject({ authorized: true, reason: null });
+	expect(open.expiresAt as number).toBeGreaterThan(Date.now());
+	expect(open.expiresAt as number).toBeLessThanOrEqual((open.evaluatedAt as number) + 10_000);
+
+	await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
+	expect(gateState(env)).toMatchObject({ authorized: false });
+
+	await harness.server.shutdown();
+	expect(gateState(env)).toMatchObject({ authorized: false, reason: expect.stringContaining("stopped") });
+});
+
+test("an ordinary server writes no gate state", async () => {
+	const { origin, worker, harness, env } = await fixture();
+	await assign(origin, worker, harness, "ordinary assignment");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	expect(gateState(env)).toBeUndefined();
+});
+
+test("the gate heartbeat re-evaluates and extends the gate state on the injected clock", async () => {
+	let clock = 1_000_000;
+	const due: { at: number; fire: () => void }[] = [];
+	const timers: WakeTimers = {
+		now: () => clock,
+		setTimeout(fire, ms) { const item = { at: clock + ms, fire }; due.push(item); return () => { due.splice(due.indexOf(item), 1); }; },
+	};
+	const { env } = await fixture({ worker: true, timers });
+	expect(gateState(env)).toMatchObject({ authorized: false, evaluatedAt: clock, expiresAt: clock + 10_000 });
+	clock += 2_000;
+	for (const item of due.filter((entry) => entry.at <= clock)) { due.splice(due.indexOf(item), 1); item.fire(); }
+	await waitFor(() => gateState(env)?.evaluatedAt === clock);
+	expect(gateState(env)).toMatchObject({ authorized: false, expiresAt: clock + 10_000 });
+	expect(due.some((entry) => entry.at === clock + 2_000)).toBe(true);
+});
+
+const node = Bun.which("node");
+
+test.skipIf(!node)("the bundled gate hook reads the state the adapter writes: allow while assigned, deny after completion", async () => {
+	const { origin, worker, harness, env } = await fixture({ worker: true });
+	const runGate = async (): Promise<{ exitCode: number; stderr: string }> => {
+		const child = Bun.spawn([node!, join(import.meta.dir, "..", "claude-plugin", CLAUDE_PLUGIN.gateBundle)], {
+			stdin: "pipe", stdout: "pipe", stderr: "pipe",
+			env: { PATH: process.env.PATH ?? "", WOLFPACK_SESSION_ID: SESSION_ID, WOLFPACK_SESSION_NAME: "claude-worker", WOLFPACK_DIR: env.WOLFPACK_DIR!, WOLFPACK_TASK_WORKER: "1" },
+		});
+		child.stdin.write(JSON.stringify({ tool_name: "Bash" }));
+		await child.stdin.end();
+		const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+		return { exitCode, stderr };
+	};
+	expect(await runGate()).toMatchObject({ exitCode: 2, stderr: expect.stringContaining(WORKER_GATE_DENIAL_CODE) });
+	const taskId = await assign(origin, worker, harness, "gated assignment");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	expect(await runGate()).toEqual({ exitCode: 0, stderr: "" });
+	await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
+	expect((await runGate()).exitCode).toBe(2);
+}, 15_000);

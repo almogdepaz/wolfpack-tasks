@@ -1,16 +1,17 @@
-import { createAgentTaskRuntime } from "../agent-task-runtime";
+import { createAgentTaskRuntime, WORKER_GATE_DENIAL_CODE } from "../agent-task-runtime";
 import type { AgentTaskHost, AgentTaskRuntime, AgentTaskRuntimeContext, AgentTaskToolDefinition, AgentTaskToolResult, ConfiguredCoreFactory } from "../agent-task-runtime";
 import { createConfiguredTaskCore } from "../configured-task-core";
 import type { TaskCore } from "../task-core";
 import { TaskEnvelopeKind, TaskProtocolError } from "../task-protocol";
 import type { TaskInboxItem } from "../task-core";
-import { CLAUDE_PLUGIN } from "./constants";
+import { CLAUDE_PLUGIN, HARNESS_PRE_ASSIGNMENT_TOOLS } from "./constants";
 import type { ClaudeEnvironment } from "./environment";
 import { isRecord } from "./json-rpc";
 import { createStatusFile } from "./status-file";
 import type { ClaudeStatusFile } from "./status-file";
 import { validateToolArguments } from "./validation";
 import { createWakeController } from "./wake";
+import { WORKER_GATE_FILE_VERSION, WORKER_GATE_HEARTBEAT_MS, WORKER_GATE_TTL_MS, writeWorkerGateState } from "./worker-gate";
 import type { CommandRunner, WakeController, WakeTimers, WakeTiming } from "./wake";
 
 export interface McpToolResult {
@@ -50,9 +51,9 @@ export interface ClaudeTaskAdapter {
 	shutdown(): Promise<void>;
 }
 
-/** Tools a worker may need before its first assignment, beyond the runtime's own pre-assignment set. */
-const HARNESS_PRE_ASSIGNMENT_TOOLS = new Set(["ToolSearch"]);
 const INBOX_TOOL = "agent_task_inbox";
+/** Any native tool name: the runtime gates every non-task tool alike, so this probe stands for all of them. */
+const GATE_PROBE_TOOL = "Bash";
 /** Events the plugin's hooks/hooks.json sends to the lifecycle tool. */
 export const LIFECYCLE_HOOK_EVENTS = Object.freeze(["prompt", "pre_tool", "tool_batch", "stop", "stop_failure"] as const);
 const LIFECYCLE_HOOK_FIELDS = Object.freeze(["session_id", "tool_name", "agent_id"] as const);
@@ -128,6 +129,58 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 		: createAgentTaskRuntime(host, undefined, async (signal, rebind) => observeIntake(await createCore(signal, rebind)) as Awaited<ReturnType<ConfiguredCoreFactory>>);
 	const tools = new Map(runtime.tools.map((tool) => [tool.name, tool]));
 
+	// Worker mode only: the gate state that the fail-closed PreToolUse command hook reads (see worker-gate.ts).
+	const gateEnabled = runtime.workerGateEnabled;
+	let gateQueue: Promise<void> = Promise.resolve();
+	let cancelGateBeat: (() => void) | undefined;
+	let gateWriteFailed = false;
+	const writeGate = (authorized: boolean, reason: string | null): void => {
+		const now = options.timers.now();
+		const written = writeWorkerGateState(environment.gatePath, {
+			version: WORKER_GATE_FILE_VERSION, sessionId: environment.sessionId, pid: process.pid, parentPid: process.ppid,
+			authorized, reason, evaluatedAt: now, expiresAt: now + WORKER_GATE_TTL_MS,
+		});
+		// The writer removes the file on failure, so the hook denies; report the first failure of a streak.
+		if (!written && !gateWriteFailed) options.log(`wolfpack-tasks: worker gate state write failed: ${environment.gatePath}`);
+		gateWriteFailed = !written;
+	};
+	/** Re-evaluates the gate. Serialized, so an older evaluation never overwrites a newer one. */
+	const refreshGate = (): Promise<void> => {
+		if (!gateEnabled) return gateQueue;
+		gateQueue = gateQueue.then(async () => {
+			if (closed) return;
+			let decision: { readonly block: boolean; readonly reason: string } | undefined;
+			try {
+				decision = await runtime.lifecycle.tool_call({ toolName: GATE_PROBE_TOOL, input: {} }, { sessionManager });
+			} catch (error) {
+				decision = { block: true, reason: error instanceof Error ? error.message : String(error) };
+			}
+			if (!closed) writeGate(decision?.block !== true, decision?.block ? decision.reason : null);
+		});
+		return gateQueue;
+	};
+	/** A hung or stopped server stops this heartbeat, so its last state expires after WORKER_GATE_TTL_MS. */
+	const scheduleGateBeat = (): void => {
+		cancelGateBeat = options.timers.setTimeout(() => { void refreshGate().then(() => { if (!closed) scheduleGateBeat(); }); }, WORKER_GATE_HEARTBEAT_MS);
+	};
+
+	const executeTool = async (name: string, args: unknown, signal: AbortSignal): Promise<McpToolResult> => {
+		const tool = tools.get(name);
+		if (!tool) return errorResult(`unknown tool ${JSON.stringify(name.slice(0, 64))}`);
+		let params: unknown;
+		try { params = validateToolArguments(name, tool.parameters, args ?? {}); } catch (error) { return errorResult(error instanceof Error ? error.message : String(error)); }
+		// A model tool call means the session is working, even if the activity hooks are unavailable.
+		wake?.activity("busy");
+		const decision = await runtime.lifecycle.tool_call({ toolName: name, input: params }, { sessionManager, signal });
+		if (decision?.block) return errorResult(decision.reason);
+		try {
+			if (name === INBOX_TOOL) return await runInbox(tool, params, signal);
+			return mcpResult(await tool.execute(name, params as never, signal, undefined, context), []);
+		} catch (error) {
+			return errorResult(error instanceof Error ? error.message : String(error));
+		}
+	};
+
 	let inboxQueue: Promise<unknown> = Promise.resolve();
 	const runInbox = (tool: AgentTaskToolDefinition, params: unknown, signal: AbortSignal): Promise<McpToolResult> => {
 		const run = inboxQueue.then(async (): Promise<McpToolResult> => {
@@ -170,22 +223,16 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 				onChange: (patch) => status?.update(patch),
 			});
 			await runtime.lifecycle.session_start({}, context);
+			if (gateEnabled && !closed) {
+				await refreshGate();
+				scheduleGateBeat();
+			}
 		},
 		async callTool(name, args, signal) {
-			const tool = tools.get(name);
-			if (!tool) return errorResult(`unknown tool ${JSON.stringify(name.slice(0, 64))}`);
-			let params: unknown;
-			try { params = validateToolArguments(name, tool.parameters, args ?? {}); } catch (error) { return errorResult(error instanceof Error ? error.message : String(error)); }
-			// A model tool call means the session is working, even if the activity hooks are unavailable.
-			wake?.activity("busy");
-			const decision = await runtime.lifecycle.tool_call({ toolName: name, input: params }, { sessionManager, signal });
-			if (decision?.block) return errorResult(decision.reason);
-			try {
-				if (name === INBOX_TOOL) return await runInbox(tool, params, signal);
-				return mcpResult(await tool.execute(name, params as never, signal, undefined, context), []);
-			} catch (error) {
-				return errorResult(error instanceof Error ? error.message : String(error));
-			}
+			const result = await executeTool(name, args, signal);
+			// The next native tool call must see the authorization this result granted or revoked.
+			await refreshGate();
+			return result;
 		},
 		async hook(input) {
 			if (!isRecord(input) || closed) return "";
@@ -217,6 +264,11 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			if (closed) return;
 			closed = true;
 			wake?.close();
+			cancelGateBeat?.();
+			if (gateEnabled && started) {
+				await gateQueue;
+				writeGate(false, `${WORKER_GATE_DENIAL_CODE}: the wolfpack-tasks MCP server stopped`);
+			}
 			await runtime.lifecycle.session_shutdown({}, context);
 		},
 	};

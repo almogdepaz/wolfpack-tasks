@@ -3,7 +3,7 @@ import type { Static, TSchema } from "typebox";
 import { abortableSleep } from "./abortable-sleep";
 import { DoneParams, InboxParams, MessageParams, SendParams, TaskIdParams, WaitParams } from "./agent-task-tool-schemas";
 import { createTaskWorkScope } from "./task-work-scope";
-import { taskWorkerModeEnabled } from "./task-worker-mode";
+import { taskWorkerModeEnabled, WORKER_GATE_DENIAL_CODE } from "./task-worker-mode";
 import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
 import { RELAY_LOSS_CODES, taskErrorClass } from "./task-errors";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
@@ -29,7 +29,7 @@ const WAIT_BACKOFF_INITIAL_MS = 250;
 const WAIT_BACKOFF_MAX_MS = 2_000;
 const PRE_ASSIGNMENT_TOOLS = new Set(["agent_task_inbox", "agent_task_status", "agent_task_wait"]);
 const COORDINATOR_ONLY_TASK_TOOLS = new Set(["agent_task_send", "agent_task_cancel", "agent_task_ack"]);
-export const WORKER_GATE_DENIAL_CODE = "PI_TASK_WORKER_ASSIGNMENT_REQUIRED";
+export { WORKER_GATE_DENIAL_CODE };
 export const WORKER_COORDINATION_FORBIDDEN_CODE = "PI_TASK_WORKER_COORDINATION_FORBIDDEN";
 
 /** Host operations the runtime needs: insert a model-visible message (optionally waking the model) and append a custom history entry. */

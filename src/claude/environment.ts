@@ -12,7 +12,7 @@ export type ClaudeEnvironment =
 	| { readonly kind: "inactive" }
 	/** Wolfpack identity is present but a required value is missing or invalid. */
 	| { readonly kind: "misconfigured"; readonly variable: string; readonly reason: string }
-	| { readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string };
+	| { readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string; readonly gatePath: string };
 
 /**
  * The identity gate is exactly WOLFPACK_SESSION_ID plus WOLFPACK_SESSION_NAME. With identity present, the values the
@@ -35,7 +35,8 @@ export function readClaudeEnvironment(env: Readonly<Record<string, string | unde
 		if (!env.HOME || !isAbsolute(env.HOME)) return misconfigured("HOME", "must be an absolute path when WOLFPACK_DIR is unset");
 		stateDir = join(env.HOME, ".wolfpack");
 	}
-	return { kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(stateDir, CLAUDE_PLUGIN.statusDirectory, `${sessionId}.json`) };
+	const directory = join(stateDir, CLAUDE_PLUGIN.statusDirectory);
+	return { kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(directory, `${sessionId}.json`), gatePath: join(directory, `${sessionId}${CLAUDE_PLUGIN.gateFileSuffix}`) };
 }
 
 function misconfigured(variable: string, reason: string): ClaudeEnvironment {

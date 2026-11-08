@@ -50,7 +50,8 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:claude": "bun scripts/build-claude.ts"
   },
   "type": "module"
 }

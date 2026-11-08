@@ -1,0 +1,88 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:wolfpack-tasks:tasks",
+            "tool": "lifecycle",
+            "input": {
+              "event": "prompt",
+              "session_id": "${session_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:wolfpack-tasks:tasks",
+            "tool": "lifecycle",
+            "input": {
+              "event": "pre_tool",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "agent_id": "${agent_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:wolfpack-tasks:tasks",
+            "tool": "lifecycle",
+            "input": {
+              "event": "tool_batch",
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:wolfpack-tasks:tasks",
+            "tool": "lifecycle",
+            "input": {
+              "event": "stop",
+              "session_id": "${session_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:wolfpack-tasks:tasks",
+            "tool": "lifecycle",
+            "input": {
+              "event": "stop_failure",
+              "session_id": "${session_id}"
+            },
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

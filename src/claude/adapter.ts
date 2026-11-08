@@ -53,6 +53,9 @@ export interface ClaudeTaskAdapter {
 /** Tools a worker may need before its first assignment, beyond the runtime's own pre-assignment set. */
 const HARNESS_PRE_ASSIGNMENT_TOOLS = new Set(["ToolSearch"]);
 const INBOX_TOOL = "agent_task_inbox";
+/** Events the plugin's hooks/hooks.json sends to the lifecycle tool. */
+export const LIFECYCLE_HOOK_EVENTS = Object.freeze(["prompt", "pre_tool", "tool_batch", "stop", "stop_failure"] as const);
+const LIFECYCLE_HOOK_FIELDS = Object.freeze(["session_id", "tool_name", "agent_id"] as const);
 
 export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): ClaudeTaskAdapter {
 	const environment = options.environment;
@@ -244,7 +247,12 @@ function listing(runtime: AgentTaskRuntime, active: boolean): McpToolListing[] {
 		name: CLAUDE_PLUGIN.lifecycleTool,
 		title: "Task lifecycle hook endpoint",
 		description: "Internal endpoint for this plugin's Claude Code hooks. Model calls are rejected.",
-		inputSchema: { type: "object", additionalProperties: false, required: ["event"], properties: Object.fromEntries(["event", "session_id", "tool_name", "agent_id"].map((key) => [key, { type: "string", maxLength: 256 }])) },
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			required: ["event"],
+			properties: { event: { type: "string", enum: [...LIFECYCLE_HOOK_EVENTS] }, ...Object.fromEntries(LIFECYCLE_HOOK_FIELDS.map((key) => [key, { type: "string", maxLength: 256 }])) },
+		},
 		_meta: { "anthropic/alwaysLoad": false },
 	});
 	return tools;

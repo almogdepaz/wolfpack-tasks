@@ -1,0 +1,14 @@
+{
+  "name": "wolfpack-tasks",
+  "owner": {
+    "name": "Almog De Paz"
+  },
+  "description": "Claude Code plugin for memory-only Wolfpack agent task delegation.",
+  "plugins": [
+    {
+      "name": "wolfpack-tasks",
+      "source": "./claude-plugin",
+      "description": "Wolfpack agent_task_* delegation tools for Claude Code sessions launched by Wolfpack."
+    }
+  ]
+}

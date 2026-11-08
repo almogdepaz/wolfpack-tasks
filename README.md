@@ -101,6 +101,23 @@ paths are on the remote host. the CLI qualifies the remote endpoint through your
 
 see the [delegation workflow](skills/wolfpack-task-delegation/SKILL.md) for role reuse, worker restrictions, readiness errors, and complete lifecycle rules.
 
+### claude code sessions
+
+the same tools are available in claude code through a plugin in this repository. the plugin runs a small MCP server (`claude-plugin/dist/server.mjs`, run by node) over the same host-neutral runtime as the pi extension. tool names, parameters, validation messages, and the worker gate are the same.
+
+```bash
+claude plugin marketplace add /absolute/path/to/wolfpack-tasks
+claude plugin install wolfpack-tasks@wolfpack-tasks
+```
+
+- **identity gate.** the server activates only when both `WOLFPACK_SESSION_ID` and `WOLFPACK_SESSION_NAME` are set, as wolfpack does for its sessions. otherwise it registers nothing, contacts nothing, writes no files or output, and every task tool returns "not a wolfpack session". with identity present, an invalid `WOLFPACK_PORT`, `WOLFPACK_JWT_SECRET`, `WOLFPACK_DIR`, or `HOME` makes every tool return "misconfigured" with the variable name.
+- **wake.** new task mail sends one `notifications/claude/channel` pointer (`wolfpack task mail: call agent_task_inbox`, with string `task_id` meta). the pointer never contains task content. the model calls `agent_task_inbox`, and the inbox result contains the messages. further mail does not send another pointer until that call.
+- **fallback.** if the pointer stays unanswered for 15s while the session is idle, the server checks `wolfpack session status <id> --json` and types the pointer into the session once (`wolfpack session send`, then a separate submit). this is best effort: the text is appended to any unsubmitted prompt input. after one fallback the server uses fallback mode for the rest of the process lifetime. it never types into a working session. idle state comes from the plugin's `UserPromptSubmit`, `PreToolUse`, and `Stop` hooks.
+- **status.** each session writes `<wolfpack state dir>/wolfpack-tasks/claude/<WOLFPACK_SESSION_ID>.json` (mode 0600; the state dir is `WOLFPACK_DIR` or `~/.wolfpack`). it records the wake mode, the negotiated MCP protocol version, and pointer, inbox, and nudge timestamps. it is diagnostic only and never task state.
+- **memory only.** as with pi, restarting the claude session loses its active tasks.
+
+the channel is a claude code research-preview surface. claude code must allow this plugin's channel (wolfpack provides a managed-settings drop-in); without it, the fallback is the wake path.
+
 ## use without wolfpack
 
 **the task core is transport-independent; the default pi extension is not.** you can import the core into your own application and supply a `TaskRelay`. there is no bundled alternative production network relay or configuration switch that makes the default extension wolfpack-free.
@@ -190,6 +207,7 @@ your application owns polling, retries, timeout evaluation, delivery acknowledgm
 bun install
 bun test
 bun run typecheck
+bun run build:claude   # rebuild the committed claude plugin bundle and skill copy; a test fails when they are stale
 ```
 
 optional real-worker checks and their prerequisites are documented in the [reference](docs/protocol-reference.md#development-and-verification).

@@ -7,6 +7,7 @@ import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import type { TaskCore } from "../src/task-core";
 import { createTaskStore } from "../src/task-store";
+import { TaskProtocolError } from "../src/task-protocol";
 import { runTaskRelayConformance } from "../src/task-relay-conformance";
 import { WORKER_COORDINATION_FORBIDDEN_CODE, WORKER_GATE_DENIAL_CODE } from "../src/agent-task-runtime";
 import { SESSION_ID, sequence, startHarness, waitFor, wolfpackEnv } from "./claude-harness";
@@ -123,4 +124,68 @@ test("the worker gate denies other tools through the PreToolUse hook until an as
 	expect(await harness.hook({ event: "pre_tool", tool_name: "Bash" })).toBe("");
 	const done = await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
 	expect(done.isError).toBeUndefined();
+});
+
+/** A worker whose first core fails `connect` on demand; the rebind returns a fresh endpoint. */
+async function relayLossFixture() {
+	process.env.WOLFPACK_TASK_WORKER = "1";
+	const relay = claudePathRelay();
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const worker = createTaskCore({ endpoint: { relay: "memory", id: "worker" }, relay, store: createTaskStore(), ids: sequence("worker") });
+	const fresh = createTaskCore({ endpoint: { relay: "memory", id: "fresh-worker" }, relay, store: createTaskStore(), ids: sequence("fresh") });
+	await origin.connect();
+	let connectionError: string | undefined;
+	let factoryCalls = 0;
+	const harness = startHarness({
+		env: wolfpackEnv(), runCommand: noCommands,
+		async createCore() {
+			factoryCalls++;
+			if (factoryCalls === 1) {
+				await worker.connect();
+				return { ...worker, async connect() {
+					if (connectionError) throw new TaskProtocolError(connectionError, "fixture connection failure", { retryable: false });
+					await worker.connect();
+				} };
+			}
+			await fresh.connect();
+			return fresh;
+		},
+	});
+	harnesses.push(harness);
+	await harness.initialize("2025-11-25");
+	await harness.notify("notifications/initialized");
+	const { taskId: lost } = await origin.createTask({ target: worker.endpoint, task: "assignment before the reset", timeoutMs: 60_000 });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 1);
+	expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
+	return {
+		origin, fresh, harness, lost,
+		async reset() {
+			connectionError = "RELAY_RESET";
+			await harness.hook({ event: "stop" });
+			await waitFor(async () => (await harness.hook({ event: "pre_tool", tool_name: "Bash" })).includes("RELAY_STATE_LOST") && factoryCalls === 2);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		},
+	};
+}
+
+test("a relay-loss note waits for the next inbox result and requests no pointer", async () => {
+	const { harness, lost, reset } = await relayLossFixture();
+	await reset();
+	expect(pointers(harness)).toHaveLength(1);
+	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(inbox).toContain("Relay state was lost");
+	expect(inbox).toContain(lost);
+});
+
+test("a buffered relay-loss note does not suppress the wake for a later assignment", async () => {
+	const { origin, fresh, harness, lost, reset } = await relayLossFixture();
+	await reset();
+	const { taskId: next } = await origin.createTask({ target: fresh.endpoint, task: "assignment after the reset", timeoutMs: 60_000 });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).some((pointer) => (pointer as { params: { meta: Record<string, string> } }).params.meta.task_id === next));
+	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(inbox).toContain("Relay state was lost");
+	expect(inbox).toContain(lost);
+	expect(inbox).toContain("assignment after the reset");
 });

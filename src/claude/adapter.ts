@@ -65,6 +65,11 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 	const sessionManager = { getEntries: (): readonly unknown[] => entries };
 	/** Model-visible messages inserted since the last inbox result. */
 	const pendingMessages: string[] = [];
+	/**
+	 * Non-triggering records (relay-loss notes) inserted outside a presentation. They wait for the next inbox
+	 * result, request no pointer, and never count as pending, so they cannot hold back later triggering mail.
+	 */
+	const deferredMessages: string[] = [];
 	const notes: string[] = [];
 	let presenting = false;
 	let lastIntake: readonly TaskInboxItem[] = [];
@@ -88,8 +93,9 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 	const host: AgentTaskHost = {
 		sendMessage(message, delivery) {
 			entries.push({ type: "custom_message", customType: message.customType, content: message.content, display: message.display, details: message.details });
-			if (!delivery.triggerTurn) pendingMessages.push(message.content);
-			requestPointer(message.details);
+			if (delivery.triggerTurn) requestPointer(message.details);
+			else if (presenting) pendingMessages.push(message.content);
+			else deferredMessages.push(message.content);
 		},
 		appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
 	};
@@ -132,7 +138,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 				let result = await tool.execute("inbox", params as never, signal, undefined, context);
 				// A refresh already in flight may have held the pointed mail before presentation began; one more pass presents it.
 				if (pointed && pendingMessages.length === 0 && !signal.aborted) result = await tool.execute("inbox", params as never, signal, undefined, context);
-				const delivered = pendingMessages.splice(0);
+				const delivered = [...deferredMessages.splice(0), ...pendingMessages.splice(0)];
 				const noted = notes.splice(0);
 				return mcpResult(result, [...delivered, ...noted]);
 			} finally {

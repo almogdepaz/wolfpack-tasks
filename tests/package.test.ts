@@ -10,7 +10,8 @@ async function readUsageDocumentation(): Promise<string> {
 	const documents = await Promise.all([readFile(readmePath, "utf8"), readFile(protocolReferencePath, "utf8")]);
 	return documents.join("\n");
 }
-const delegationSkillPath = new URL("../skills/wolfpack-pi-task-delegation/SKILL.md", import.meta.url);
+const delegationSkillPath = new URL("../skills/wolfpack-task-delegation/SKILL.md", import.meta.url);
+const retiredDelegationSkillPath = new URL("../skills/wolfpack-pi-task-delegation", import.meta.url);
 const summarySkillPath = new URL("../skills/task-context-summary/SKILL.md", import.meta.url);
 const removedPaths = [
 	"../src/v1-compat-extension.ts",
@@ -28,6 +29,32 @@ const removedPaths = [
 ] as const;
 
 describe("v2-only package", () => {
+	test("publishes the wolfpack-tasks identity while keeping pi discovery", async () => {
+		const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
+			readonly name?: string;
+			readonly version?: string;
+			readonly repository?: { readonly url?: string };
+			readonly keywords?: readonly string[];
+		};
+		expect(packageJson.name).toBe("@sgtbeatdown/wolfpack-tasks");
+		expect(packageJson.version).toBe("0.2.0");
+		expect(packageJson.repository?.url).toBe("https://github.com/almogdepaz/wolfpack-tasks.git");
+		expect(packageJson.keywords).toContain("pi-package");
+		const readme = await readFile(readmePath, "utf8");
+		expect(readme).toContain("pi install npm:@sgtbeatdown/wolfpack-tasks");
+		expect(readme).not.toContain("@sgtbeatdown/pi-tasks");
+	});
+
+	test("ships one harness-neutral delegation skill", async () => {
+		expect(existsSync(retiredDelegationSkillPath)).toBe(false);
+		const skill = await readFile(delegationSkillPath, "utf8");
+		expect(skill).toMatch(/^---\nname: wolfpack-task-delegation\n/);
+		expect(skill).toContain("Claude Code");
+		expect(skill).toContain("Pi");
+		expect(skill).toContain("`WOLFPACK_TASK_WORKER=1`");
+		expect(skill).not.toMatch(/^# wolfpack pi task delegation$/m);
+	});
+
 	test("publishes only the v2 extension, root export, and supported scripts", async () => {
 		const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
 			readonly description?: string;

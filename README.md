@@ -1,12 +1,12 @@
-# pi-tasks
+# wolfpack-tasks
 
 **give another pi agent a task, exchange messages, and get a structured result back.**
 
-pi-tasks adds coordination tools to [pi](https://pi.dev). a parent agent can hand work to another session, keep working, and receive a follow-up when the worker asks a question or finishes. it works between sessions on one machine and, through wolfpack's trusted tailnet routing, across machines.
+wolfpack-tasks adds coordination tools to [pi](https://pi.dev). a parent agent can hand work to another session, keep working, and receive a follow-up when the worker asks a question or finishes. it works between sessions on one machine and, through wolfpack's trusted tailnet routing, across machines.
 
 for example: an implementer works on a change while the parent investigates something else. the implementer reports its result; the parent checks the diff and tests, then acknowledges the task.
 
-**pi-tasks coordinates work. it does not create agent sessions or execute the assignment itself.** wolfpack manages sessions and carries messages; the agents do the work.
+**wolfpack-tasks coordinates work. it does not create agent sessions or execute the assignment itself.** wolfpack manages sessions and carries messages; the agents do the work.
 
 ## how it works
 
@@ -32,7 +32,7 @@ this is the ready-made integration. you need pi, a compatible wolfpack memory-on
 ### 1. install the pi package
 
 ```bash
-pi install npm:@sgtbeatdown/pi-tasks
+pi install npm:@sgtbeatdown/wolfpack-tasks
 ```
 
 start new pi sessions after installation. wolfpack supplies `WOLFPACK_SESSION_NAME` to its sessions; the extension uses it to register the current process. the local control port defaults to `18790` (`WOLFPACK_PORT` overrides it).
@@ -99,7 +99,7 @@ wolfpack --machine <peer> session create --project-dir /absolute/remote/worktree
 
 paths are on the remote host. the CLI qualifies the remote endpoint through your local coordinator and returns a locally routable `taskEndpoint`. use that returned address in the same send flow. if it reports `taskEndpointError`, inspect the retained `sessionId` rather than blindly creating another session. use the same `--machine` selector for cleanup.
 
-see the [delegation workflow](skills/wolfpack-pi-task-delegation/SKILL.md) for role reuse, worker restrictions, readiness errors, and complete lifecycle rules.
+see the [delegation workflow](skills/wolfpack-task-delegation/SKILL.md) for role reuse, worker restrictions, readiness errors, and complete lifecycle rules.
 
 ## use without wolfpack
 
@@ -114,7 +114,7 @@ import {
   createInMemoryTaskRelay,
   createTaskCore,
   createTaskStore,
-} from "@sgtbeatdown/pi-tasks";
+} from "@sgtbeatdown/wolfpack-tasks";
 
 const relay = createInMemoryTaskRelay("demo");
 const parentStore = createTaskStore();

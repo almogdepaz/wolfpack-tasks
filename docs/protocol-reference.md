@@ -88,7 +88,7 @@ Endpoint assignments require terminal completion and one `agent_task_ack`; full-
 
 ## worker-only execution gate
 
-The exact value `PI_TASK_WORKER=1` enables a fail-closed model tool gate. Before assignment only inbox/status/wait are allowed; other tools receive `PI_TASK_WORKER_ASSIGNMENT_REQUIRED`. Ordinary interactive Pi and explicit user shell commands are outside this gate.
+The exact value `PI_TASK_WORKER=1` or the harness-neutral alias `WOLFPACK_TASK_WORKER=1` enables a fail-closed model tool gate; either variable alone is sufficient, and other values leave the gate off. The error codes keep their `PI_TASK_WORKER_` prefix because they are a stable contract. Before assignment only inbox/status/wait are allowed; other tools receive `PI_TASK_WORKER_ASSIGNMENT_REQUIRED`. Ordinary interactive Pi and explicit user shell commands are outside this gate.
 
 `PI_TASK_WORKER=1` sessions are leaf roles. Generic role-orchestration guidance applies only to non-worker coordinators. The spawning coordinator owns each child's complete lifecycle.
 

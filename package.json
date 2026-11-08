@@ -1,14 +1,14 @@
 {
-  "name": "@sgtbeatdown/pi-tasks",
-  "version": "0.1.17",
-  "description": "Memory-only endpoint-owned Pi agent delegation through Wolfpack relay v2.",
+  "name": "@sgtbeatdown/wolfpack-tasks",
+  "version": "0.2.0",
+  "description": "Memory-only endpoint-owned agent delegation for Pi and Claude Code through Wolfpack relay v2.",
   "module": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/almogdepaz/pi-tasks.git"
+    "url": "https://github.com/almogdepaz/wolfpack-tasks.git"
   },
   "keywords": [
     "pi-package",

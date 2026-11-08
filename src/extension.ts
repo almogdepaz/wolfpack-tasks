@@ -5,6 +5,7 @@ import { Type } from "typebox";
 
 import { abortableSleep } from "./abortable-sleep";
 import { createTaskWorkScope } from "./task-work-scope";
+import { taskWorkerModeEnabled } from "./task-worker-mode";
 import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
 import { RELAY_LOSS_CODES, taskErrorClass } from "./task-errors";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
@@ -113,7 +114,7 @@ export function registerAgentTaskTools(pi: ExtensionAPI, core: TaskCore | undefi
 	let backgroundTimer: ReturnType<typeof setTimeout> | undefined;
 	let lifecycleEpoch = 0;
 	const closingTaskIds = new Set<string>();
-	const workerGateEnabled = process.env.PI_TASK_WORKER === "1";
+	const workerGateEnabled = taskWorkerModeEnabled();
 	const ownedLoader = core === undefined ? createConfiguredCoreLoader(createCore) : undefined;
 	const configuredCore: ConfiguredCoreFactory = ownedLoader ?? (async (): Promise<TaskCore> => core!);
 	let relayLossRecovery: Promise<void> | undefined;

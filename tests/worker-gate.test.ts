@@ -55,6 +55,17 @@ test("activated workers fail closed before assignment while exact opt-out sessio
 	expect(await call(ordinaryGate, "bash", { command: "pwd" }, [])).toBeUndefined();
 });
 
+test("WOLFPACK_TASK_WORKER=1 activates the same worker gate as PI_TASK_WORKER=1", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const worker = createTaskCore({ endpoint: WORKER, relay, store: createTaskStore(), ids: sequence("worker") });
+	const neutralGate = registerGate(worker, undefined, "1");
+	expect(await call(neutralGate, "bash", { command: "pwd" }, [])).toEqual({ block: true, reason: DENIAL_CODE });
+	expect(await call(neutralGate, "agent_task_send", {}, [])).toEqual({ block: true, reason: COORDINATION_DENIAL_CODE });
+	expect(await call(neutralGate, "agent_task_inbox", {}, [])).toBeUndefined();
+	const inactiveGate = registerGate(worker, undefined, "true");
+	expect(await call(inactiveGate, "bash", { command: "pwd" }, [])).toBeUndefined();
+});
+
 test("assigned workers cannot call coordinator-only task tools", async () => {
 	const fixture = await assignedFixture(1);
 	const taskId = requiredTaskId(fixture.taskIds, 0);
@@ -211,10 +222,13 @@ test("terminal preflight closes only its assigned task and permits only idempote
 	expect(await call(gate, "bash", { command: "pwd" }, [firstAssignment, secondAssignment])).toEqual({ block: true, reason: DENIAL_CODE });
 });
 
-function registerGate(core: TaskCore, workerMode: string | undefined): ToolCallHandler {
+function registerGate(core: TaskCore, workerMode: string | undefined, neutralWorkerMode?: string): ToolCallHandler {
 	const previous = process.env.PI_TASK_WORKER;
+	const previousNeutral = process.env.WOLFPACK_TASK_WORKER;
 	if (workerMode === undefined) delete process.env.PI_TASK_WORKER;
 	else process.env.PI_TASK_WORKER = workerMode;
+	if (neutralWorkerMode === undefined) delete process.env.WOLFPACK_TASK_WORKER;
+	else process.env.WOLFPACK_TASK_WORKER = neutralWorkerMode;
 	let handler: ToolCallHandler | undefined;
 	try {
 		registerAgentTaskTools({
@@ -226,6 +240,8 @@ function registerGate(core: TaskCore, workerMode: string | undefined): ToolCallH
 	} finally {
 		if (previous === undefined) delete process.env.PI_TASK_WORKER;
 		else process.env.PI_TASK_WORKER = previous;
+		if (previousNeutral === undefined) delete process.env.WOLFPACK_TASK_WORKER;
+		else process.env.WOLFPACK_TASK_WORKER = previousNeutral;
 	}
 	if (handler === undefined) throw new Error("expected the worker tool gate to register");
 	return handler;

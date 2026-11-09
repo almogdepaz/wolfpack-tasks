@@ -18,7 +18,7 @@
   "tools": {
     "agent_task_send": {
       "label": "Send Agent Task",
-      "description": "Create a task in this endpoint's RAM and submit its assignment; restart loses active state.",
+      "description": "Record a task before relay submission; the default journal recovers the same session UUID without replaying tools.",
       "parameters": {
         "type": "object",
         "required": [
@@ -105,7 +105,7 @@
     },
     "agent_task_message": {
       "label": "Message Agent Task",
-      "description": "Record a message intent in this lifetime before relay submission.",
+      "description": "Record a message intent with stable identity before relay submission.",
       "parameters": {
         "type": "object",
         "required": [
@@ -136,7 +136,7 @@
     },
     "agent_task_cancel": {
       "label": "Cancel Agent Task",
-      "description": "Record cancellation in this lifetime before relay submission.",
+      "description": "Record cancellation with stable identity before relay submission.",
       "parameters": {
         "type": "object",
         "required": [
@@ -168,7 +168,7 @@
     },
     "agent_task_done": {
       "label": "Complete Agent Task",
-      "description": "Record a terminal intent in this lifetime before relay submission.",
+      "description": "Record a terminal intent with stable identity before relay submission.",
       "parameters": {
         "type": "object",
         "required": [

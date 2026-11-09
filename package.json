@@ -1,7 +1,7 @@
 {
   "name": "@sgtbeatdown/wolfpack-tasks",
   "version": "0.2.0",
-  "description": "Memory-only endpoint-owned agent delegation for Pi and Claude Code through Wolfpack relay v2.",
+  "description": "Restart-safe endpoint-owned agent delegation for Pi and Claude Code through Wolfpack.",
   "module": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"

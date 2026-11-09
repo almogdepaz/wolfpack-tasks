@@ -14,8 +14,8 @@ interface Tool {
 }
 
 test("default extension uses the configured Wolfpack relay adapter rather than an in-memory or missing relay", async () => {
-	const previousSession = process.env.WOLFPACK_SESSION_NAME;
-	delete process.env.WOLFPACK_SESSION_NAME;
+	const previousSession = process.env.WOLFPACK_SESSION_NAME, previousId = process.env.WOLFPACK_SESSION_ID;
+	delete process.env.WOLFPACK_SESSION_NAME; delete process.env.WOLFPACK_SESSION_ID;
 	const tools: Record<string, Tool> = {};
 	piTasks({ on: () => undefined, registerCommand: () => undefined, registerTool(tool: unknown) { const value = tool as Tool; tools[value.name] = value; } } as unknown as ExtensionAPI);
 
@@ -23,7 +23,8 @@ test("default extension uses the configured Wolfpack relay adapter rather than a
 
 	if (previousSession === undefined) delete process.env.WOLFPACK_SESSION_NAME;
 	else process.env.WOLFPACK_SESSION_NAME = previousSession;
-	expect(result.content[0]?.text).toContain("WOLFPACK_SESSION_NAME is required");
+	if (previousId === undefined) delete process.env.WOLFPACK_SESSION_ID; else process.env.WOLFPACK_SESSION_ID = previousId;
+	expect(result.content[0]?.text).toContain("WOLFPACK_SESSION_ID UUID is required");
 });
 
 test("returns structured relay metadata and the persisted task id after assignment delivery fails", async () => {

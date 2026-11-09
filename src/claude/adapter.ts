@@ -91,7 +91,8 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 	};
 	const requestPointer = (details?: unknown): void => { if (!presenting) wake?.requestPointer(pointerMeta(details)); };
 
-	// Pi entry shapes, so the shared evidence index (incorporation, wakes, records) reads them unchanged.
+	// Current-MCP-lifetime evidence uses Pi entry shapes. It is not restored as proof of Claude consumption.
+	// Durable core wake-attempt reservations fence an unproven active presentation after process replacement.
 	const host: AgentTaskHost = {
 		sendMessage(message, delivery) {
 			entries.push({ type: "custom_message", customType: message.customType, content: message.content, display: message.display, details: message.details });
@@ -124,7 +125,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			return items;
 		},
 	});
-	const createCore: ConfiguredCoreFactory = options.createCore ?? ((signal, rebind) => createConfiguredTaskCore({ sessionName: environment.sessionName, rebind }, signal));
+	const createCore: ConfiguredCoreFactory = options.createCore ?? ((signal, rebind) => createConfiguredTaskCore({ sessionId: environment.sessionId, sessionName: environment.sessionName, rebind }, signal));
 	const runtime = options.core
 		? createAgentTaskRuntime(host, observeIntake(options.core))
 		: createAgentTaskRuntime(host, undefined, async (signal, rebind) => observeIntake(await createCore(signal, rebind)) as Awaited<ReturnType<ConfiguredCoreFactory>>);

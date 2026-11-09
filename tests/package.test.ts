@@ -83,14 +83,15 @@ describe("v2-only package", () => {
 			// The volatile-v1 transport and legacy cutover warning are not the removed v1 task runtime.
 			expect(document).not.toMatch(/\b(?:pi-tasks\/v1|v1-compat-extension|legacy-extension|task-metrics|task board|historical reporting)\b/i);
 			expect(document).toContain("volatile-v1");
-			expect(document).toContain("RELAY_STATE_LOST");
-			expect(document).toContain("unknown remote outcome");
+			expect(document).toContain("restart-safe-v1");
+			expect(document).toContain("TASK_PRESENTATION_UNCONFIRMED");
+			expect(document).toContain("UUID");
 			expect(document).not.toContain("/task-relay-rebind");
-			expect(document).toContain("can lose even accepted mail");
+			expect(document).not.toContain("Both relay mail and endpoint task bookkeeping live in RAM");
 		}
-		expect(readme).toContain("requires a compatible Wolfpack memory-owned server");
-		expect(readme).toContain("No transport opt-in flag is needed");
-		expect(readme).toContain("`WOLFPACK_SESSION_NAME` resolves the active Pi process to its relay endpoint");
+		expect(readme).toContain("requires a compatible Wolfpack server");
+		expect(readme).toContain("names cannot select or recover stored tasks");
+		expect(readme).toContain("unsupported/corrupt stores fail without migration or deletion");
 		expect(`${readme}\n${skill}`).not.toContain("task-gateway.md");
 	});
 

@@ -43,5 +43,5 @@ test("the status line names class, code and operation, and an unknown code falls
 	// Actionable relay-state labels take precedence over the generic format.
 	expect(taskFailureStatus(new TaskProtocolError("RELAY_RESET", "reset", { retryable: false, details: { operation: "send" } }))).toBe("tasks: relay state lost; rebinding automatically");
 	expect(taskFailureStatus(new TaskProtocolError("RELAY_AUTH_REQUIRED", "auth", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: Wolfpack authentication required");
-	expect(taskFailureStatus(new TaskProtocolError("RELAY_PROFILE_REQUIRED", "profile", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: compatible memory-owned relay required");
+	expect(taskFailureStatus(new TaskProtocolError("RELAY_PROFILE_REQUIRED", "profile", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: compatible task relay profile required");
 });

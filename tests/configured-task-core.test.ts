@@ -27,7 +27,7 @@ function fixture(handler?: (body: any, init: RequestInit) => Promise<Response> |
           : { kind: "page", deliveries: [], nextCursor: "0", hasMore: false };
     return Response.json({ ok: true, profile, epoch, value });
   }, { preconnect: fetch.preconnect }) as typeof fetch;
-  return { path, calls, options: { sessionName: "fixture", baseUrl: "http://127.0.0.1:1", fetch: fetcher }, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { path, calls, options: { profile: "volatile-v1" as const, sessionName: "fixture", baseUrl: "http://127.0.0.1:1", fetch: fetcher }, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("configured close discards RAM and the next lifecycle registers a fresh identity without replay", async () => {

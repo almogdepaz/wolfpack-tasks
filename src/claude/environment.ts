@@ -6,7 +6,7 @@ import { CLAUDE_PLUGIN } from "./constants";
 /** Default local Wolfpack control port, the same default the configured task core uses. */
 export const DEFAULT_WOLFPACK_PORT = "18790";
 const JWT_SECRET_MIN_CHARS = 32;
-const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type ClaudeEnvironment =
 	/** Not a Wolfpack session: no registration, no relay or CLI contact, no files, no output. */
@@ -23,7 +23,7 @@ export function readClaudeEnvironment(env: Readonly<Record<string, string | unde
 	const sessionId = env.WOLFPACK_SESSION_ID?.trim();
 	const sessionName = env.WOLFPACK_SESSION_NAME?.trim();
 	if (!sessionId || !sessionName) return { kind: "inactive" };
-	if (!SESSION_ID_PATTERN.test(sessionId)) return misconfigured("WOLFPACK_SESSION_ID", "must be a Wolfpack session id (letters, digits, '.', '_' or '-')");
+	if (!SESSION_ID_PATTERN.test(sessionId)) return misconfigured("WOLFPACK_SESSION_ID", "must be the broker-injected Wolfpack session UUID; names cannot recover task state");
 	const port = env.WOLFPACK_PORT ?? DEFAULT_WOLFPACK_PORT;
 	if (!/^[0-9]+$/.test(port) || Number(port) < 1 || Number(port) > 65535) return misconfigured("WOLFPACK_PORT", "must be a TCP port from 1 to 65535");
 	const secret = env.WOLFPACK_JWT_SECRET?.trim();

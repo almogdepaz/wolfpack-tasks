@@ -27,7 +27,7 @@ completion ends the **task**, not the **session**. keep a worker for another ass
 
 ## use with wolfpack
 
-this is the ready-made integration. you need pi, a compatible wolfpack memory-only server, and this package loaded in every participating pi session.
+this is the ready-made integration. you need pi, a compatible wolfpack `restart-safe-v1` server, and this package loaded in every participating pi session.
 
 ### 1. install the pi package
 
@@ -115,7 +115,7 @@ claude plugin install wolfpack-tasks@wolfpack-tasks
 - **fallback.** if the pointer stays unanswered for 15s while the session is idle, the server checks `wolfpack session status <id> --json` and types the pointer into the session once (`wolfpack session send`, then a separate submit). a failed status check is retried every 5s, up to 3 checks; after that the server releases the pointer and records `wakeStalledAt`, and the next mail starts a new wake. a failed or timed-out paste is never repeated or submitted, and the pointer expires after 120s. this is best effort: the text is appended to any unsubmitted prompt input. after one fallback the server uses fallback mode for the rest of the process lifetime. it never types into a working session. idle state comes from the plugin's `UserPromptSubmit`, `PreToolUse`, and `Stop` hooks.
 - **status.** each session writes `<wolfpack state dir>/wolfpack-tasks/claude/<WOLFPACK_SESSION_ID>.json` (mode 0600; the state dir is `WOLFPACK_DIR` or `~/.wolfpack`). it records the wake mode, the negotiated MCP protocol version, pointer, inbox, and nudge timestamps, the status-check failure count, and `wakeStalledAt`. it is diagnostic only and never task state.
 - **worker gate.** in a worker session (`WOLFPACK_TASK_WORKER=1` or `PI_TASK_WORKER=1`, with wolfpack identity), two `PreToolUse` hooks gate claude code's native tools. the `mcp_tool` hook asks the server and gives the full denial reason, but claude code allows the tool when that hook fails. the second hook is a `/bin/sh` command with `onFailure: "block"`. when neither variable is exactly `1`, it reads and discards the hook input and exits 0 without starting node. otherwise it runs `claude-plugin/dist/worker-gate.mjs` with node, which asks the running MCP server over a unix socket and allows a native tool only when the server answers with an authorization for this session. the socket is `<state dir>/wolfpack-tasks/claude/gate/<first 16 hex characters of sha256(WOLFPACK_SESSION_ID)>.sock` in a mode-0700 directory; the server listens only in worker mode, replaces a stale socket at start, and removes its socket on shutdown. the server answers from a fresh evaluation, or from its latest one when the evaluation takes more than 1s. it holds at most 16 connections and closes each one 2s after accept, so slow clients cannot exhaust its descriptors; a query it rejects is denied. no listener (a stopped or killed server), no answer within 3s, a malformed, oversized, or other-session answer, a socket path longer than 103 bytes, a crash, a timeout, or a missing node blocks the tool in a worker session. limits: claude code cannot enforce the gate when hooks are disabled (`disableAllHooks`, managed hook policy) or the plugin is disabled; every session with the plugin enabled starts `/bin/sh` for each native tool call.
-- **memory only.** as with pi, restarting the claude session loses its active tasks.
+- **restart recovery.** protocol state uses the same UUID-owned journal as Pi. after an active assignment presentation, MCP-process replacement without authoritative consumption evidence reports `TASK_PRESENTATION_UNCONFIRMED` and keeps the worker gate closed. it never replays that assignment; protocol persistence alone does not prove model consumption.
 
 the channel is a claude code research-preview surface. claude code must allow this plugin's channel (wolfpack provides a managed-settings drop-in); without it, the fallback is the wake path.
 
@@ -188,21 +188,22 @@ implement the exported [`TaskRelay` interface](src/task-protocol.ts) to connect 
 
 `receive()` returns items in order: `relay` items wrap a delivery you acknowledge with `acknowledgeRelayDelivery`, and `local` items carry an event the origin itself canonicalized, which you complete with `completeLocalPresentation` once presented.
 
-`createTaskCore({ timers })` accepts a `TaskTimers` clock for the delivery budget (deadline, retry slices, cooldowns), which lets tests run those bounds on virtual time; task records still use `clock`. an origin can move an active task off a target whose loss the relay reported with `reassignTask`; the [reference](docs/protocol-reference.md#memory-owned-lifecycle) covers its preconditions and why the default extension does not call it yet.
+`createTaskCore({ timers })` accepts a `TaskTimers` clock for the delivery budget (deadline, retry slices, cooldowns), which lets tests run those bounds on virtual time; task records still use `clock`. an origin can move an active task off a target whose loss the relay reported with `reassignTask`; the [reference](docs/protocol-reference.md#restart-safe-lifecycle) covers its preconditions and why the default extension does not call it yet.
 
 your application owns polling, retries, timeout evaluation, delivery acknowledgments, and shutdown. it also owns how assignments reach an agent and how that agent runs them. the core alone does not install pi tools or wake a model.
 
 ## important limits
 
-- **active state lives in ram.** a pi restart loses that endpoint's tasks; a relay restart can lose even accepted mail. pi session history remains readable, but does not restore tasks or authorize workers after restart.
+- **restart-safe, not exactly-once execution.** private SQLite journals preserve accepted mail, task/event identities, pending outbox, receipts and parent ACKs. recovery requires the same broker-injected session UUID, generation and validated ownership. Pi reconciles durable session-entry evidence without replaying tools; uncertain wake outcomes are blocked, not guessed successful.
+- **no automatic identity migration.** new sessions and reused names do not inherit tasks. corrupt/unsupported stores and mismatched wire profiles fail explicitly. the explicit `volatile-v1` profile remains memory-only; there is no fallback to it.
 - **accepted is not executed.** relay acceptance, receiver receipt, pi follow-up insertion, model execution, and task completion are separate stages.
 - **the parent owns task status.** a worker submits a result; the origin processes it before its task becomes terminal. status reads are local snapshots.
 - **use a trusted network.** the wolfpack integration assumes trusted tailnet machines. do not expose owner APIs to the public internet or an untrusted proxy.
 
 ## reference and development
 
-- [protocol and operations reference](docs/protocol-reference.md): memory lifecycle, restart loss, authentication, worker gate, delivery evidence, and acknowledgment details.
-- [wolfpack relay control API](https://github.com/almogdepaz/wolfpack/blob/main/docs/control-api-schema.md#pi-tasks-relay-v2-boundary): transport contract.
+- [protocol and operations reference](docs/protocol-reference.md): restart recovery, storage compatibility, authentication, worker gate, delivery evidence, and acknowledgment details.
+- [wolfpack relay control API](https://github.com/almogdepaz/wolfpack/blob/main/docs/control-api-schema.md#pi-tasks-relay-restart-safe-v1): transport contract.
 
 ```bash
 bun install

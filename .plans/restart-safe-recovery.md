@@ -1,0 +1,118 @@
+# restart-safe task recovery
+
+## current authority and lifecycle
+
+- active correction task: `809a97d1-716c-42a1-a6ff-274cf20c1611`; assignment event: `e5387dd8-e3bf-4b63-af69-27b7cf8f9885`.
+- previous task `d49b9374-7e27-46c3-9abf-1a928c9cd04c` is canonical cancelled and ACKed exactly once (coordinator report). its aged messages are superseded, not new authority.
+- sole implementer session: `c9353127-64e9-4c36-98a6-6dca4791d2c4`; coordinator: `c0c3d36e-f01a-49f8-b53d-211fb5b95746`; outer task: `7bcb8c26-dd9c-449b-ba28-73309e0a5a1a`. independent review belongs to the parent. no new sessions/subagents.
+- source/git ownership returned to this implementer; coordinator will not race git writes. retain session for corrections. no self-approval/readiness/finalization.
+- tasks worktree: `/Users/home/Dev/recovery-worktrees/wolfpack-tasks`, `recovery/restart-safe-tasks`; base `015a0311add9c853d0d93c912546ca61e483a51f`; preserved WIP HEAD `3bdc4d29e2722d2569cf864fa1708b28dc1a0c04`; blocked draft https://github.com/almogdepaz/wolfpack-tasks/pull/31.
+- Wolfpack worktree: `/Users/home/Dev/recovery-worktrees/wolfpack`, `recovery/restart-safe-relay`; base `370fde0f481a067baa76a878fe8a0b3d49096eba`; preserved WIP HEAD `addc5ccf4b926c146804981be67c6dc13d6ecf1a`; blocked draft https://github.com/almogdepaz/wolfpack/pull/482.
+- R5 code checkpoints: tasks `4ed064969efbb6141428ea638371073d982e7e77`; Wolfpack `6a71594237d1e7f957d425f52138a74c2f5f46ab`. installed Pi characterization commit: tasks `9ceced193c8ba1c359142eea48bfaa9a2998e1fc`. later ledger commits may follow these code checkpoints; git is the current HEAD source of truth.
+- both WIP HEADs and clean initial trees verified at correction startup. coordinator published earlier review-only snapshots `11fda67bfd10a7c627d19a52838cd062f0216930` (tasks) and `42fd53b546ac484f0938cbbb2e62eae7f854b3a2` (Wolfpack) on `review/restart-safe-snapshot-7bcb8c26`; do not edit those branches.
+
+## parent contract decision
+
+active-task answer `2764313c-0eef-44de-bdc1-dd3b428811d6` authorizes sequential corrections on real PR branches. it resolves the earlier scope hold, not the findings or Claude USER gate.
+
+- R1/R2 approved after intended real-installed-runtime reds: actual manager ID/header/canonical file + fresh exact broker/harness/project and post-await recapture before payload reads/authorization; separate assignment/wake reserved/emitting attempts.
+- R3 conditionally approved: exact canonical regular fd, complete exact owner/attempt/task/event records on current branch, fsync same fd and directory, then revalidate identity/current branch before witness commit. propagate errors. no Pi content/core/vendor writes. insertion does not prove consumption/start/execution; insertion-before-model-start resume stays uncertain without stronger actual evidence.
+- provisional NEW-only bootstrap approved only with affirmative current NEW lifecycle/header and empty controller; never adopt prior scope/journal/reservations. no-session fails; no recovered/tool authority before actual file/evidence bind. accepted-work ambiguity must survive controller loss. real prompt-free end-to-end proof required; report contradiction rather than manufacture a user message.
+- R5 approved: typed fatal/unknown, confirmed termination, bounded single-flight reopen without mutation replay.
+- R6 limited to authoritatively DEAD broker incarnations with zero payload/receipt/forward/ACK obligations, rechecked with generation/mutation at commit. live/offline/unavailable/dormant is not dead. deterministic endpoint synthesis and client high-water resurrection are REJECTED and will not be implemented. preserve server identity/generation/cursor. endpoint terminal GC still requires a separate settled-obligation/tombstone barrier.
+- R4 integration and real cross-repo lifecycle checks remain required. full suites only at reviewed stable revision. both drafts stay blocked; Claude USER gate remains unanswered.
+
+## findings: R1–R6 remain changes required
+
+the contract was forwarded and inspected; current authority is the parent decision above. R5 WIP still requires correction/evidence review; R1/R2 feature reds and R3 implementation are next. no additional Claude disposition is authorized. historical scope-hold evidence below is retained, but the hold is resolved within the approved boundaries.
+
+- **R1 ownership:** broker UUID+URL journal bootstrap currently reads task state before fresh broker inspection and ignores Pi conversation/file identity. relay supports only one generation per broker UUID. both sides need conversation-scoped switch/resume authority without taking over or deleting dormant obligations.
+- **R2 ambiguous enqueue:** both semantic assignment presentation and wake need durable pre-emission reservations. absent immediate entries after possible emission are unknown, never evidence that retry/discard is safe. current WIP has wake markers, not complete assignment-presentation protection.
+- **R3 evidence (gated):** `getEntries()` is RAM/all-branches, not durable/current context. durable file inclusion, active-branch inclusion, model consumption, execution and side-effect success are separate. current WIP claims/authorization remain insufficient.
+- **R4 compatibility:** restart-safe/volatile profile/default discovery, schemas, readiness, CLI/status, peers, mixed versions and actual supported Pi runtime need coordinated coverage. current default changes are unapproved WIP.
+- **R5 poisoned owner:** correction code is committed with typed fatal/unknown propagation, confirmed termination, bounded reopen and native trigger/process regressions. the stale-reply and transient-open defects found during correction are fixed from intended reds. finding remains open pending independent source/evidence review; this is not self-approval.
+- **R6 retention:** durable registration and endpoint history caps currently become lifetime ceilings. safe reclamation must use authoritative retirement and verified obligation absence; never delete active/unacknowledged/unknown work or allow replay after dedup expiry.
+
+## unapproved Claude behavior already preserved
+
+existing WIP implements a conservative blocked disposition after active presentation and MCP replacement. this crossed the unanswered policy gate and is NOT approved, universally durable, or limited only to a demonstrably lost inbox response. preserve transparently; no further policy implementation or new transcript integration.
+
+- `src/task-store.ts`: operation lookup; `src/task-core.ts`: `wake-attempt:<eventId>` reservation and `hasPresentationAttempt`.
+- `src/task-inbox.ts`: unknown wake handling; `src/agent-task-runtime.ts`: `unconfirmedPresentationTasks`, inbox error and execution gate filtering.
+- `src/claude/adapter.ts`: current-lifetime synthetic entries and explicit configured broker ID; `tests/restart-safe-claude.test.ts`: blocked adapter-lifetime replacement case.
+- README/reference/skill source+copy and generated Claude bundle include this disposition. the generated server bundle predates the latest native storage guard changes and requires deliberate regeneration only when authorized.
+- ordinary web-server/relay restart while MCP remains alive is a separate recoverable protocol interruption, not this policy choice.
+
+## source investigation for correction contract
+
+actual installed Pi 1.4.0 read-only reference:
+`/Users/home/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/core/`.
+worktree dependency is Pi 0.80.10; installed-runtime evidence must not be inferred from dependency-only tests.
+
+- `session-manager.d.ts:178` exposes `ReadonlySessionManager`: `getSessionId(): string`, `getSessionFile(): string | undefined`, `getHeader()`, `getCwd()`, `getLeafId()`, `getEntry()`, `getBranch(fromId?)`, `buildContextEntries()` and other read methods. `isPersisted()` is NOT on the extension's readonly interface. use no inherited `PI_SESSION_*` identity.
+- `session-manager.js:655-766`: opening loads header identity; `newSession` creates a new ID and planned filename, but not necessarily a file. `_loadEntries` can migrate/rewrite; do not use a second `SessionManager.open` as a production read-only durability verifier.
+- `session-manager.js:779-819`: getters return current identity/path; `_appendEntry` updates RAM first. `_persist` creates a new file only after a user/assistant message exists and uses synchronous writes/close, not fsync. `getSessionFile()` being defined does not prove a file exists or is durable.
+- `agent-session-runtime.js:100-170,173-249,253-295`: switch/new/fork/import replace runtime after shutdown; import may copy the same header ID to a different path; event reason alone does not authenticate identity. `session_start` supplies startup/reload/new/resume/fork and optional previous file. `/tree` emits `session_tree` without a new conversation ID; active-branch membership must be rechecked.
+- `agent-session.js:1844-1890`: `sendCustomMessage` is async and may queue follow-up/defer until settlement/turn end. `:2765-2773` extension `pi.sendMessage` discards its promise and reports failure through extension error events. immediate scans are not completion receipts.
+
+### correction proposal requirements (not locked semantics)
+
+1. fresh exact broker UUID/liveness/harness/canonical project proof before opening task payload state; capture current manager ID/header/path, then validate canonical file metadata and conversation binding before task-store load or gate authorization.
+2. immutable conversation-scoped identity index and relay registration key must allow a different legitimate conversation to get its own empty scope while retaining dormant scopes. identical ID with copied/moved/replaced file or different broker cannot inherit authority. same exact tuple resumes its endpoint/generation; no live-owner force takeover.
+3. separate durable semantic-presentation and wake attempts precede possible emission. once emitted, uncertainty remains reserved across restart; only authoritative proof resolves it. no receipt proves execution.
+4. candidate Pi durability proof for parent inspection: native read-only verification of complete exact records in the manager's canonical file, matched to current branch/identity, plus explicit file/directory synchronization and revalidation. do not modify Pi content/core/vendor caches. capabilities and crash cases need actual installed-runtime tests, not fake-host proof.
+5. bootstrap blocker to resolve explicitly: fresh persistent Pi managers have planned files but no persisted file until conversation starts. strict existing-file ownership validation would block prompt-free worker readiness. no-session mode must fail; any provisional fresh-scope bootstrap must be specifically reviewed and must never rehydrate prior payload state without full identity/file validation.
+6. R5: typed owner-fatal/uncertain outcome, immediate RAM fencing, confirmed worker termination, single-flight bounded/backoff reopen of the same journal; return the interrupted request's unknown outcome, do not replay it. persistent invalid format/corruption stays blocked.
+7. R6: fresh authoritative broker death plus zero unresolved transport/protocol obligations before reclamation. the earlier broader finalized-retirement proposal is not authorized. disconnect/lease expiry alone is not sufficient. completed endpoint-state pruning needs terminal/parent-ACK plus a verifiable delivery/dedup retention barrier; capacity failure alone is not a complete policy.
+
+### exact proposed Pi API surface
+
+use the supported root export `ExtensionContext`, not an internal SDK import of `ReadonlySessionManager`:
+
+```ts
+type PiOwnerSource = Pick<ExtensionContext["sessionManager"],
+  "getSessionId" | "getSessionFile" | "getHeader" | "getCwd" | "getLeafId" | "getBranch">;
+declare function verifyPiOwner(source: PiOwnerSource, brokerUUID: string, baseUrl: string,
+  signal?: AbortSignal): Promise<ValidatedPiOwner>;
+type ConfiguredCoreFactory = (signal?: AbortSignal, rebind?: boolean,
+  context?: AgentTaskRuntimeContext) => Promise<TaskCore>;
+declare function reservePresentation(input: {
+  ownerBinding: ValidatedPiOwner; taskId: string; eventId: string;
+  stage: "assignment" | "wake"; branchAnchor: string | null;
+}): { attemptId: string; state: "reserved" | "emitting" | "proven" };
+```
+
+these are approved local API directions under the parent conditions above, not yet implemented. Pi conversation IDs are opaque manager IDs, not necessarily UUIDs; only broker incarnation requires the broker UUID. journal lookup by conversation ID must validate immutable full owner metadata before cell load, never choose a new empty namespace on a metadata mismatch. source names, previous-session hints and lifecycle reason are not authority. fresh broker and recaptured manager/file identity checks precede task-journal access. the existing metadata check must precede payload decode/index rebuild.
+
+relay proposal adds scope `(brokerUUID, "pi", piSessionId)`, immutable file/header binding digest and stable per-conversation generation. broker-scoped native exclusive ownership plus durable increasing controller fence/nonce distinguishes active controller incarnations. dormant scope obligations stay intact; stale prior activations cannot address the successor. this is not a new per-session cryptographic principal; existing trusted local/Tailnet/JWT boundary remains unchanged.
+
+R5 recovery policy proposed/sent: single-flight replacement only after confirmed termination; one reopen attempt per call; monotonic cooldown 1/2/4/8/16/30 seconds, then 30-second half-open rate. permanent invalid storage and unconfirmed termination remain non-retryable blocked, with no fallback/new epoch. only a success from the still-current healthy owner may reset failure state. the earlier R6 deterministic endpoint/high-water revival proposal is REJECTED. no revival protocol will be implemented. initial retirement is only authoritative-dead + zero obligations, with commit-time revalidation; replay-safety under expiry/clock change still needs characterization without broadening that boundary. endpoint terminal age or accepted outbox alone cannot prove cross-participant drain.
+
+## correction checkpoint (R5 code committed; drafts blocked)
+
+- tests now select the installed public Pi 1.4.0 SDK explicitly through `PI_TASKS_PI_RUNTIME` and a version pin. `tests/pi-runtime-characterization.test.ts` uses real SessionManager and AgentSession plus the existing offline faux provider, not a fake history host or external model. four characterizations pass: RAM before file; new/fork/copy/tree identities; read-only native fd/directory fsync without content rewrite; actual void extension send during agent_settled before a later wake entry. these do not establish recovery authorization or execution.
+- R5 WIP source: Wolfpack `owner-failure.ts`, journal/store/gateway, worker entry/client/protocol, facade backoff and error schema/routes; tasks transport error codec/registry. native typed fatal propagation fences RAM and closes owner; client retains original task/envelope and pending outbox on epochless uncertainty. no identity/presentation/reclamation/Claude disposition correction was included.
+- intended native reds: `correction-r5-trigger-red` (missing typed uncertain/fatal result), `correction-r5-cooldown-red` (immediate repeated worker write), and task transport `correction-r5-endpoint-red` (typed epochless error misread as invalid response).
+- narrow greens: `correction-r5-trigger-green` 1/0; `correction-r5-cooldown-green-2` 2/0; `correction-r5-endpoint-green-3` 4/0. `correction-r5-native-checkpoint-2` 5/0 covers real scoped SQL trigger, backoff, another-process SQLITE_BUSY + SIGKILL same-epoch recovery, permanent invalid-format block, and termination-rejection injection retaining the root reservation. termination failure uses fault injection at the native Worker boundary; process death/SQLITE_BUSY use actual separate processes.
+- historical R5 reds retained: `correction-r5-stale-reply-red` proves a delayed genuinely committed old reply cleared a later failure's cooldown; `correction-r5-transient-open-red` proves a valid temporarily inaccessible store was permanently mislabeled invalid. no fixes were made during the hold. after parent authorization, each fix passed its exact `*-green` rerun. `correction-r5-native-green` is 7/0, exit 0. `correction-r5-held-state` remains the earlier 5/2, exit 1, not erased or relabeled.
+- earlier affected `correction-r5-existing-checks` 45/3 is preserved. after authorization, generated schema was synchronized and two old tests now honor retryAfterMs/typed uncertainty. `correction-r5-focused-green` is 67 pass/2 pinned-source prerequisite skips/0 fail across seven named files, exit 0 (native failure/recovery, explicit volatile, compiled worker, schema, production HTTP/JWT/trusted peer). this does not close R1–R6 without parent review.
+- latest Wolfpack typecheck: `correction-r5-held-typecheck-2.log/.meta`, exit 0, after the two new intended-red tests. the prior held typecheck exited 2 with TS2769 because the test compared a future, not-yet-implemented error-code literal to the present enum; widening only the test comparison to string preserved the runtime red and restored typechecking. tasks `correction-tasks-typecheck-current.log/.meta` remains exit 0 with unchanged production/test inputs since that check. previous `correction-r5-typecheck-1`, `-2`, `-current` remain recorded.
+- preserved diagnostic, not native failure: Bun 1.4.2 `toMatchObject({value: expect.any(Number)})` replaces the received numeric field with an asymmetric matcher. minimal `correction-r5-matcher-probe` confirms before=number, after=object. corrected tests avoid mutable asymmetric matches; no production workaround. first installed SDK characterization failed setup because `bindExtensions` requires `{}`; corrected and rerun. neither setup failure is an intended feature red.
+- R5 commits are listed above; scoped pushes follow this ledger update. generated schema and Claude bundle are synchronized to the R5 source; regeneration preserves the explicitly UNAPPROVED Claude policy, it does not accept it. `correction-r5-claude-bundle` exit 0 and `correction-r5-package-checks` 28/0 (bundle/parity/default Node extension/native endpoint reopen/error-codec) are source/package checks, not installed Pi 1.4 proof. actual installed Pi characterization is separate, 4/0. `correction-r5-tasks-codec` is 29/0, and latest `correction-r5-backend-types` / `correction-r5-tasks-types` are exit 0. all named logs have exact `.meta` commands/statuses in the private evidence root. both draft PRs remain blocked.
+
+## evidence and limits
+
+- private root `/tmp/wolfpack-recovery-d49b9374`, mode 0700. full logs under `evidence/`; exact-command runner `run-check.sh` writes `.log` plus `.meta` (command/cwd/HEAD/dirty/time/exit). source matrix `evidence/coordinator-source-matrix.md` is historical investigation, not a second ledger or approval.
+- original intended restart reds: `tasks-red.log`, `relay-red.log`. characterization: `tasks-characterization.log`, `relay-characterization.log`. duplicate/unobserved wake reds: `presentation-red.log`, `unobserved-wake-red.log`; these do not establish installed Pi durable evidence.
+- earlier `journal-focused-1.log` wrong `task.acknowledged` assertion and `relay-typecheck-2.log` TS2345 remain preserved. later corrected checks exist; do not erase failed evidence.
+- parent independently ran review snapshots: tasks 11fda67 7 pass/0 fail (terminal/parent-ACK and Bun→Node native SQLite), Wolfpack 42fd53b5 6/0 (cross-host and real worker/process). these clear only those narrow snapshot checks, not R1–R6.
+- previous implementer checkpoint `tasks-focused-review.log/.meta`: 203/0 in 21 affected files, not final-revision or whole-goal proof. latest native corrections: `unsupported-mode-green.log/.meta` 8/0; `relay-unsupported-mode-green.log/.meta` 8/0. `wolfpack-route-corrections.log/.meta`: 35/0 with two pinned-source prerequisite skips. `cross-repo-review.log/.meta`: private configured-core/worker HTTP restart/terminal/ACK probe, not conversation-identity evidence.
+- prior typecheck evidence: `tasks-typecheck-review.log/.meta` and `wolfpack-typecheck-corrections.log/.meta`, exit 0; coordinator separately reports both current WIP typechecks exit 0. later correction edits require affected checks.
+- excluded faulty fault probes remain retained: initial sidecar modes were masked by umask, initial live-owner chmod left open SQLite journal writable, and initial profile probe retained preload volatile mode. corrected intended-red and green logs use `*-intended-red`, `*-green-corrected` and `poisoned-worker-green`; none may be relabeled as broader proof.
+- no full suites until parent explicitly schedules the once-per-touched-repo final gate. every service/broker/relay test must use private HOME/WOLFPACK_DIR/sockets/ports; never real ~/.wolfpack or port 18790. existing ignored dependency symlinks only; no installs, migration, publication, live restart or deployment. source tests are not installed/deployed behavior.
+
+## next
+
+1. finish sequential R5 stale-reply/transient-open fixes from existing native reds, synchronize affected artifacts and focused checks, then scoped correction commits/pushes.
+2. capture actual installed-runtime R1/R2 reds, implement only approved identity/provisional/proof boundaries, and report any prompt-free contradiction. R6 dead-owner retirement follows a separate native red; endpoint GC and Claude remain gated.
+3. integrate R4 and real cross-repo lifecycle cases; keep drafts blocked until independent review. no full suites until scheduled. never amend/rebase/force push/merge or mark ready; retain this session.

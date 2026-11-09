@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { CLAUDE_PLUGIN } from "../src/claude/constants";
 import { readClaudeEnvironment } from "../src/claude/environment";
-import { queryWorkerGate } from "../src/claude/worker-gate";
+import { queryWorkerGate, WORKER_GATE_ANSWER_WAIT_MS } from "../src/claude/worker-gate";
 import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import type { TaskCore } from "../src/task-core";
@@ -128,8 +128,8 @@ test("the worker gate denies other tools through the PreToolUse hook until an as
 	expect(done.isError).toBeUndefined();
 });
 
-/** A worker whose first core fails `connect` on demand; the rebind returns a fresh endpoint. */
-async function relayLossFixture() {
+/** A worker whose first core fails `connect` on demand; the rebind returns a fresh endpoint, after `rebind` settles. */
+async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
 	process.env.WOLFPACK_TASK_WORKER = "1";
 	const relay = claudePathRelay();
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
@@ -138,8 +138,9 @@ async function relayLossFixture() {
 	await origin.connect();
 	let connectionError: string | undefined;
 	let factoryCalls = 0;
+	const env = wolfpackEnv();
 	const harness = startHarness({
-		env: wolfpackEnv(), runCommand: noCommands,
+		env, runCommand: noCommands,
 		async createCore() {
 			factoryCalls++;
 			if (factoryCalls === 1) {
@@ -149,6 +150,7 @@ async function relayLossFixture() {
 					await worker.connect();
 				} };
 			}
+			await options.rebind;
 			await fresh.connect();
 			return fresh;
 		},
@@ -161,7 +163,10 @@ async function relayLossFixture() {
 	await waitFor(() => pointers(harness).length === 1);
 	expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
 	return {
-		origin, fresh, harness, lost,
+		origin, fresh, harness, lost, env,
+		factoryCalls: () => factoryCalls,
+		/** Makes the next background refresh lose the relay, without any gate refresh of its own. */
+		loseRelay() { connectionError = "RELAY_RESET"; },
 		async reset() {
 			connectionError = "RELAY_RESET";
 			await harness.hook({ event: "stop" });
@@ -249,6 +254,29 @@ test("a restarted worker server replaces the stale socket of a killed server", a
 	await fixture({ worker: true, env });
 	expect(await queryGate(env)).toEqual({ ok: true, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
 });
+
+test("a slow fresh evaluation answers from this lifetime's last decision after the wait, and a new server starts at deny", async () => {
+	let release!: () => void;
+	const rebind = new Promise<void>((resolve) => { release = resolve; });
+	const { harness, env, factoryCalls, loseRelay } = await relayLossFixture({ rebind });
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: true, reason: null });
+	// The worker-mode background refresh (1 s) loses the relay; the rebind then holds every evaluation on the new core.
+	loseRelay();
+	await waitFor(() => factoryCalls() === 2, 4_000);
+	const startedAt = Date.now();
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: true, reason: null });
+	const waitedMs = Date.now() - startedAt;
+	expect(waitedMs).toBeGreaterThanOrEqual(WORKER_GATE_ANSWER_WAIT_MS - 50);
+	expect(waitedMs).toBeLessThan(WORKER_GATE_ANSWER_WAIT_MS + 1_000);
+	release();
+	await waitFor(async () => { const answer = await queryGate(env); return answer.ok && !answer.authorized; });
+	expect(await queryGate(env)).toMatchObject({ ok: true, authorized: false, reason: expect.stringContaining("RELAY_STATE_LOST") });
+
+	// A new server lifetime for the same session holds no earlier decision: it answers deny.
+	await harness.server.shutdown();
+	await fixture({ worker: true, env });
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
+}, 10_000);
 
 const node = Bun.which("node");
 

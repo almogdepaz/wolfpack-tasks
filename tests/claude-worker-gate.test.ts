@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 
 import { CLAUDE_PLUGIN } from "../src/claude/constants";
 import { readClaudeEnvironment } from "../src/claude/environment";
-import { decideWorkerGateHook, listenWorkerGate, queryWorkerGate, UNIX_SOCKET_PATH_MAX_BYTES } from "../src/claude/worker-gate";
+import { decideWorkerGateHook, listenWorkerGate, queryWorkerGate, UNIX_SOCKET_PATH_MAX_BYTES, WORKER_GATE_REQUEST_DEADLINE_MS, WORKER_GATE_TIMEOUT_MS } from "../src/claude/worker-gate";
 import type { WorkerGateAnswer } from "../src/claude/worker-gate";
 import { WORKER_GATE_DENIAL_CODE } from "../src/agent-task-runtime";
 import { SESSION_ID, shortTempDir } from "./claude-harness";
@@ -36,8 +36,8 @@ async function decide(env: Env, options: { stdin?: string; timeoutMs?: number } 
 	return { ...result, read };
 }
 
-async function serve(env: Env, answer: () => WorkerGateAnswer | Promise<WorkerGateAnswer>, log: string[] = []) {
-	const listener = await listenWorkerGate({ path: socketPath(env), sessionId: SESSION_ID, answer: async () => answer(), log: (message) => { log.push(message); } });
+async function serve(env: Env, answer: () => WorkerGateAnswer | Promise<WorkerGateAnswer>, log: string[] = [], limits: { maxConnections?: number; requestDeadlineMs?: number } = {}) {
+	const listener = await listenWorkerGate({ path: socketPath(env), sessionId: SESSION_ID, answer: async () => answer(), log: (message) => { log.push(message); }, ...limits });
 	if (listener) cleanups.push(() => listener.close());
 	return listener;
 }
@@ -287,3 +287,81 @@ test("a non-socket file at the socket path is kept and the listener does not sta
 	expect(readFileSync(path, "utf8")).toBe("keep");
 	expect(log).toEqual([expect.stringContaining("not a socket")]);
 });
+
+/** A client that sends an incomplete request and then one more byte every `everyMs`, until the server closes it. */
+function trickle(path: string, everyMs: number) {
+	const socket = createConnection(path);
+	const openedAt = Date.now();
+	let received = "";
+	let interval: ReturnType<typeof setInterval> | undefined;
+	socket.on("connect", () => { socket.write("{"); interval = setInterval(() => { if (!socket.destroyed) socket.write(" "); }, everyMs); });
+	socket.on("data", (chunk) => { received += chunk; });
+	socket.on("error", () => undefined);
+	const closed = new Promise<{ afterMs: number; received: string }>((resolve) => socket.on("close", () => { clearInterval(interval); resolve({ afterMs: Date.now() - openedAt, received }); }));
+	cleanups.push(() => { clearInterval(interval); socket.destroy(); });
+	return { socket, closed, get open() { return !socket.destroyed; } };
+}
+
+test("the request deadline is absolute from accept, below the hook timeout, and trickling bytes do not extend it", async () => {
+	expect(WORKER_GATE_REQUEST_DEADLINE_MS).toBeLessThan(WORKER_GATE_TIMEOUT_MS);
+	const env = workerEnv();
+	await serve(env, () => AUTHORIZED);
+	// One byte every 250 ms would keep an idle timeout from ever firing.
+	const { closed } = trickle(socketPath(env), 250);
+	const { afterMs, received } = await closed;
+	expect(received).toBe("");
+	expect(afterMs).toBeGreaterThanOrEqual(WORKER_GATE_REQUEST_DEADLINE_MS - 50);
+	expect(afterMs).toBeLessThan(WORKER_GATE_REQUEST_DEADLINE_MS + 500);
+}, 6_000);
+
+test("connections beyond the cap are closed at accept, the hook denies meanwhile, and the gate recovers when the flood clears", async () => {
+	const env = workerEnv();
+	const path = socketPath(env);
+	await serve(env, () => AUTHORIZED, [], { maxConnections: 4, requestDeadlineMs: 400 });
+	const admitted = Array.from({ length: 4 }, () => trickle(path, 50));
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	expect(admitted.every((client) => client.open)).toBe(true);
+	const flood = Array.from({ length: 12 }, () => trickle(path, 50));
+	const rejected = await Promise.all(flood.map((client) => client.closed));
+	expect(rejected.every(({ afterMs, received }) => afterMs < 300 && received === "")).toBe(true);
+	expect(admitted.every((client) => client.open)).toBe(true);
+	expect(await queryWorkerGate(path, { sessionId: SESSION_ID, toolName: "Bash" })).toMatchObject({ ok: false });
+	const expired = await Promise.all(admitted.map((client) => client.closed));
+	expect(expired.every(({ afterMs, received }) => afterMs >= 350 && afterMs < 900 && received === "")).toBe(true);
+	expect(await queryWorkerGate(path, { sessionId: SESSION_ID, toolName: "Bash" })).toEqual({ ok: true, authorized: true, reason: null });
+}, 5_000);
+
+// Runs a listener in its own process with a long deadline, holds one incomplete request open, then closes the listener.
+const CLOSING_SERVER = `
+const { listenWorkerGate } = await import(process.env.GATE_MODULE);
+const listener = await listenWorkerGate({ path: process.env.GATE_PATH, sessionId: process.env.GATE_SESSION, answer: async () => ({ authorized: true, reason: null }), log: (line) => console.error(line), requestDeadlineMs: 30000 });
+console.log(listener ? "ready" : "failed");
+process.stdin.on("data", () => undefined);
+process.stdin.on("end", () => { void listener.close().then(() => { console.log("closed"); process.stdin.destroy(); }); });
+`;
+
+test("closing the listener clears the deadline timers of open connections, so its process can exit", async () => {
+	const env = workerEnv();
+	const path = socketPath(env);
+	const child = Bun.spawn([process.execPath, "-e", CLOSING_SERVER], {
+		env: { ...process.env, GATE_MODULE: join(import.meta.dir, "..", "src", "claude", "worker-gate.ts"), GATE_PATH: path, GATE_SESSION: SESSION_ID },
+		stdin: "pipe", stdout: "pipe", stderr: "inherit",
+	});
+	cleanups.push(() => { child.kill("SIGKILL"); });
+	const reader = child.stdout.getReader();
+	let text = "";
+	while (!text.includes("ready")) {
+		const { value, done } = await reader.read();
+		if (done) throw new Error(`gate server exited before it listened: ${text}`);
+		text += new TextDecoder().decode(value);
+	}
+	reader.releaseLock();
+	const client = trickle(path, 100);
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	expect(client.open).toBe(true);
+	child.stdin.end();
+	const exited = await Promise.race([child.exited.then(() => "exited"), new Promise((resolve) => setTimeout(() => resolve("still running"), 2_000))]);
+	expect(exited).toBe("exited");
+	expect((await client.closed).received).toBe("");
+	expect(existsSync(path)).toBe(false);
+}, 5_000);

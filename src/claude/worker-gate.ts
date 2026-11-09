@@ -28,6 +28,10 @@ export const WORKER_GATE_PROTOCOL_VERSION = 1;
 export const WORKER_GATE_TIMEOUT_MS = 3_000;
 /** The server waits at most this long for a fresh evaluation, then answers from the latest one. */
 export const WORKER_GATE_ANSWER_WAIT_MS = 1_000;
+/** The server closes a connection this long after accept, answered or not; below the hook's timeout. */
+export const WORKER_GATE_REQUEST_DEADLINE_MS = 2_000;
+/** Connections the server holds at once; it closes more at accept, so slow clients cannot take every descriptor. */
+export const WORKER_GATE_MAX_CONNECTIONS = 16;
 export const WORKER_GATE_REQUEST_MAX_BYTES = 4_096;
 export const WORKER_GATE_REPLY_MAX_BYTES = 16_384;
 /** Bound on the denial text the hook prints; Claude Code shows it to the model. */
@@ -151,6 +155,10 @@ export interface WorkerGateListenOptions {
 	/** The server's current gate decision; a rejection answers with a denial carrying its message. */
 	answer(): Promise<WorkerGateAnswer>;
 	log(message: string): void;
+	/** Defaults to `WORKER_GATE_MAX_CONNECTIONS`. */
+	readonly maxConnections?: number;
+	/** Defaults to `WORKER_GATE_REQUEST_DEADLINE_MS`. */
+	readonly requestDeadlineMs?: number;
 }
 
 /**
@@ -176,12 +184,17 @@ export async function listenWorkerGate(options: WorkerGateListenOptions): Promis
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return failed(`cannot inspect ${path}: ${message(error)}`);
 	}
 
+	const maxConnections = options.maxConnections ?? WORKER_GATE_MAX_CONNECTIONS;
+	const requestDeadlineMs = options.requestDeadlineMs ?? WORKER_GATE_REQUEST_DEADLINE_MS;
 	const sockets = new Set<Socket>();
 	const server = createServer((socket) => {
-		sockets.add(socket);
-		socket.on("close", () => sockets.delete(socket));
 		socket.on("error", () => undefined);
-		socket.setTimeout(WORKER_GATE_TIMEOUT_MS, () => socket.destroy());
+		// Admission: a slow or hostile client cannot hold more than the cap; the hook denies a rejected query.
+		if (sockets.size >= maxConnections) { socket.destroy(); return; }
+		sockets.add(socket);
+		// Absolute from accept, unlike an idle timeout, so trickling bytes cannot extend it.
+		const deadline = setTimeout(() => socket.destroy(), requestDeadlineMs);
+		socket.on("close", () => { clearTimeout(deadline); sockets.delete(socket); });
 		let received = Buffer.alloc(0);
 		let handled = false;
 		socket.on("data", (chunk: Buffer) => {

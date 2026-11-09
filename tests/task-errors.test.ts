@@ -4,8 +4,8 @@ import { outboxFailureStatus as taskFailureStatus } from "../src/extension";
 import { RELAY_LOSS_CODES, RESET_CODES, RETRY_CODES, TASK_ERRORS, isBlockedOutboxDeliveryCode, taskErrorClass } from "../src/task-errors";
 import { TaskOutboxDeliveryError, TaskProtocolError } from "../src/task-protocol";
 
-test("derived code sets equal the sets the transport, extension and outbox used before the registry", () => {
-	expect([...RETRY_CODES].sort()).toEqual(["PEER_UNREACHABLE", "RELAY_CAPACITY", "RELAY_UNAVAILABLE"]);
+test("derived retry/reset/blocked sets preserve explicit transport policy", () => {
+	expect([...RETRY_CODES].sort()).toEqual(["PEER_UNREACHABLE", "RELAY_CAPACITY", "RELAY_STORAGE_BUSY", "RELAY_STORAGE_RECOVERING", "RELAY_STORAGE_UNAVAILABLE", "RELAY_STORAGE_UNCERTAIN", "RELAY_UNAVAILABLE"]);
 	expect([...RESET_CODES].sort()).toEqual(["CALLER_DEAD", "CALLER_NOT_FOUND", "REGISTRATION_EXPIRED", "RELAY_RESET", "SOURCE_MISMATCH"]);
 	expect([...RELAY_LOSS_CODES].sort()).toEqual(["RELAY_REBIND_REQUIRED", "RELAY_RESET"]);
 	const blocked = Object.keys(TASK_ERRORS).filter(isBlockedOutboxDeliveryCode).sort();

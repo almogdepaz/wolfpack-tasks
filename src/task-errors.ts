@@ -22,6 +22,12 @@ interface TaskErrorSpec {
 
 export const TASK_ERRORS: Readonly<Record<string, TaskErrorSpec>> = {
 	// transport
+	RELAY_STORAGE_BUSY: { class: "capacity", retryable: true, forceRetry: true, message: "another process owns the relay journal" },
+	RELAY_STORAGE_RECOVERING: { class: "capacity", retryable: true, forceRetry: true, message: "relay owner recovery is cooling down; request was not admitted" },
+	RELAY_STORAGE_RECOVERY_BLOCKED: { class: "state", retryable: false, message: "relay owner termination is unconfirmed; storage remains reserved" },
+	RELAY_STORAGE_INVALID: { class: "state", retryable: false, message: "relay journal validation failed; committed state is retained" },
+	RELAY_STORAGE_UNAVAILABLE: { class: "transport", retryable: true, forceRetry: true, message: "relay storage is temporarily unavailable; recorded operations are retained" },
+	RELAY_STORAGE_UNCERTAIN: { class: "transport", retryable: true, forceRetry: true, message: "relay journal commit outcome is unknown; retry only the recorded protocol identity" },
 	RELAY_UNAVAILABLE: { class: "transport", retryable: true, forceRetry: true, message: "relay is unavailable" },
 	PEER_UNREACHABLE: { class: "transport", retryable: true, forceRetry: true, message: "peer relay is unreachable" },
 	RELAY_TIMEOUT: { class: "transport", retryable: true, message: "relay request timed out" },

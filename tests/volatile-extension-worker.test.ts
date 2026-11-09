@@ -17,7 +17,7 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and auto
       execFileSync(process.execPath, ["test", import.meta.path], { timeout: 15_000, stdio: "pipe", env: {
         PATH: process.env.PATH, HOME: home, PI_TASKS_EXTENSION_FIXTURE_HOME: home,
         PI_TASKS_WOLFPACK_SOURCE: wolfpack, PI_TASKS_WOLFPACK_REVISION: revision,
-        PI_TELEMETRY: "0", WOLFPACK_PORT: "1", WOLFPACK_DIR: join(home, ".wolfpack"), WOLFPACK_TASK_RELAY_PROFILE: "volatile-v1",
+        PI_TELEMETRY: "0", WOLFPACK_PORT: "1",
       } });
     } finally { rmSync(home, { recursive: true, force: true }); }
     return;
@@ -66,7 +66,7 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and auto
     expect(frames.some(frame => frame.operation === "acknowledge")).toBe(true);
     // A self-task can reduce intents locally and miss a dropped method receiver.
     // Use a distinct configured endpoint so the parent must process a wire intent.
-    peerCore = await createConfiguredTaskCore({ profile: "volatile-v1", sessionName: "fixture-peer", baseUrl: server.url.origin });
+    peerCore = await createConfiguredTaskCore({ sessionName: "fixture-peer", baseUrl: server.url.origin });
     const remote = await tools.agent_task_send.execute("peer-task", { to: peerCore.endpoint, task: "exercise wire intent ACK through the owned core receiver", timeoutMs: 60_000 }, undefined);
     expect(remote.isError).not.toBe(true);
     await peerCore.receive();

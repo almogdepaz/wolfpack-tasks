@@ -66,12 +66,10 @@ export type SubmitIntentOutcome =
 	| { readonly authority: "origin"; readonly canonicalEvent: { readonly type: string; readonly reused: boolean } }
 	| { readonly authority: "receiver" };
 
-/** Reserve emission before waking. Only a durable harness observation permits flush to create acceptance evidence. */
+/** Local `wake_accepted` evidence is persisted before Pi wake emission; flush delivers it once the wake is observed. */
 export interface WakeRequest {
-	/** An earlier process reserved emission, but no durable harness wake was observed. */
-	readonly outcome?: "new" | "unconfirmed";
 	flush(signal?: AbortSignal): Promise<void>;
-	/** Withdraw only when the caller can prove emission never started. An unobserved attempted wake is uncertain. */
+	/** Withdraws the never-sent record when Pi did not accept the wake; call synchronously after the wake attempt. */
 	discard(): void;
 }
 
@@ -81,8 +79,6 @@ export type TaskInboxItem =
 	| { readonly kind: "local"; readonly event: TaskEvent; readonly order: number };
 
 export interface TaskCore {
-	/** Durable controllers never clear state or bind a fresh identity after loss. */
-	readonly recoveryProfile?: "restart-safe-v1";
 	readonly endpoint: TaskEndpoint;
 	connect(signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
 	createTask(input: CreateTaskInput, signal?: AbortSignal, work?: TaskWorkScope): Promise<{ readonly taskId: string }>;
@@ -110,8 +106,6 @@ export interface TaskCore {
 	submitIntentWithOutcome?(input: SubmitIntentInput, signal?: AbortSignal, work?: TaskWorkScope): Promise<SubmitIntentOutcome>;
 	recordInsertion(input: { readonly taskId: string; readonly eventId: string }, signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
 	recordWakeRequest(input: { readonly taskId: string; readonly eventId: string }, work?: TaskWorkScope): WakeRequest;
-	/** Read-only crash-attempt evidence; not proof of model consumption. */
-	hasPresentationAttempt?(taskId: string, eventId: string): boolean;
 	evaluateTimeouts(signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
 	acknowledgeParent(taskId: string, signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
 	/**
@@ -277,7 +271,6 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 	};
 
 	return {
-		...(options.store.durability && { recoveryProfile: options.store.durability }),
 		endpoint: options.endpoint,
 		async connect(signal, work = workScope(signal)) {
 			signal = work.signal;
@@ -301,12 +294,12 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 			};
 			const created = event(task, ids(), "task.created", "1", options.endpoint, target, now, { task: input.task });
 			const assignment = envelope(ids(), options.endpoint, target, taskId, TaskEnvelopeKind.assignment, { task, event: created }, now);
+			options.store.transaction(() => {
+				options.store.putTask(task);
+				options.store.appendEvent(created);
+				options.store.putOutbox(assignment);
+			});
 			try {
-				options.store.transaction(() => {
-					options.store.putTask(task);
-					options.store.appendEvent(created);
-					options.store.putOutbox(assignment);
-				});
 				await flush(signal, new Set([assignment.envelopeId]), work);
 			} catch (error) {
 				throw operationError(error, taskId);
@@ -402,7 +395,6 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 			});
 			await ship(signal, persistedEnvelopeIds, work, () => throwIfDeliveryEvidenceBlocked(options.store, input.taskId, persistedEnvelopeIds, evidence));
 		},
-		hasPresentationAttempt(taskId, eventId) { return options.store.getTaskOperation(taskId, `wake-attempt:${eventId}`) !== undefined; },
 		recordWakeRequest(input, work) {
 			const evidence: DeliveryEvidence = { eventId: input.eventId, stage: TaskDeliveryStage.wakeAccepted, state: TaskDeliveryEvidenceState.confirmed };
 			const operation = deliveryEvidenceOperation(evidence);
@@ -414,13 +406,10 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 					payload: { eventId: input.eventId, stage: evidence.stage, state: evidence.state },
 				}, operation);
 			});
-			const attemptOperation = `wake-attempt:${input.eventId}`;
-			const attempt = options.store.transaction(() => options.store.reserveTaskOperation({ taskId: input.taskId, operation: attemptOperation,
-				logicalId: ids(), logicalType: "task.wake_attempt", envelopeIds: [] }));
-			// A reservation is NOT wake acceptance. Only flush after durable harness evidence may create a receipt.
-			let persisted: ReturnType<typeof persist> | undefined;
+			// An origin canonicalizes evidence straight into its task log, which cannot be withdrawn,
+			// so it records on flush; a receiver writes its outbound record before the wake.
+			let persisted = sameEndpoint(options.endpoint, requiredTask(options.store, input.taskId).origin) ? undefined : persist();
 			return {
-				outcome: attempt.created ? "new" : "unconfirmed",
 				flush: async (signal?: AbortSignal): Promise<void> => {
 					const { envelopeIds } = persisted ??= persist();
 					const activeWork = work ?? workScope(signal);
@@ -429,7 +418,6 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 				discard: () => {
 					// No await separates the write from this call, so the envelope was never offered to the relay.
 					if (persisted?.created) options.store.discardUnsentOperation(input.taskId, operation);
-					if (attempt.created) options.store.discardUnsentOperation(input.taskId, attemptOperation);
 					persisted = undefined;
 				},
 			};

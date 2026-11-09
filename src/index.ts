@@ -3,7 +3,7 @@ export { createTaskCore } from "./task-core";
 export { createConfiguredTaskCore } from "./configured-task-core";
 export type { ConfiguredTaskCoreOptions, OwnedTaskCore } from "./configured-task-core";
 export { createTaskStore } from "./task-store";
-export { createVolatileTaskSession, createRestartSafeTaskSession, VOLATILE_PROFILE, RESTART_SAFE_PROFILE } from "./volatile-task-session";
+export { createVolatileTaskSession, VOLATILE_PROFILE } from "./volatile-task-session";
 export type { VolatileTaskSession, VolatileTaskSessionOptions } from "./volatile-task-session";
 export { WOLFPACK_TASK_RELAY_ID } from "./wolfpack-endpoint-view";
 export { runTaskRelayConformance } from "./task-relay-conformance";

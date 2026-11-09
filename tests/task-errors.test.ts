@@ -4,7 +4,7 @@ import { outboxFailureStatus as taskFailureStatus } from "../src/extension";
 import { RELAY_LOSS_CODES, RESET_CODES, RETRY_CODES, TASK_ERRORS, isBlockedOutboxDeliveryCode, taskErrorClass } from "../src/task-errors";
 import { TaskOutboxDeliveryError, TaskProtocolError } from "../src/task-protocol";
 
-test("derived retry/reset/blocked sets preserve explicit transport policy", () => {
+test("derived code sets preserve baseline resets/loss and add only typed relay storage retries", () => {
 	expect([...RETRY_CODES].sort()).toEqual(["PEER_UNREACHABLE", "RELAY_CAPACITY", "RELAY_STORAGE_BUSY", "RELAY_STORAGE_RECOVERING", "RELAY_STORAGE_UNAVAILABLE", "RELAY_STORAGE_UNCERTAIN", "RELAY_UNAVAILABLE"]);
 	expect([...RESET_CODES].sort()).toEqual(["CALLER_DEAD", "CALLER_NOT_FOUND", "REGISTRATION_EXPIRED", "RELAY_RESET", "SOURCE_MISMATCH"]);
 	expect([...RELAY_LOSS_CODES].sort()).toEqual(["RELAY_REBIND_REQUIRED", "RELAY_RESET"]);
@@ -43,5 +43,5 @@ test("the status line names class, code and operation, and an unknown code falls
 	// Actionable relay-state labels take precedence over the generic format.
 	expect(taskFailureStatus(new TaskProtocolError("RELAY_RESET", "reset", { retryable: false, details: { operation: "send" } }))).toBe("tasks: relay state lost; rebinding automatically");
 	expect(taskFailureStatus(new TaskProtocolError("RELAY_AUTH_REQUIRED", "auth", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: Wolfpack authentication required");
-	expect(taskFailureStatus(new TaskProtocolError("RELAY_PROFILE_REQUIRED", "profile", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: compatible task relay profile required");
+	expect(taskFailureStatus(new TaskProtocolError("RELAY_PROFILE_REQUIRED", "profile", { retryable: false, details: { operation: "connect" } }))).toBe("tasks: compatible memory-owned relay required");
 });

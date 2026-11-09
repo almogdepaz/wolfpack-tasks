@@ -4,7 +4,7 @@ import { abortableSleep } from "./abortable-sleep";
 import { DoneParams, InboxParams, MessageParams, SendParams, TaskIdParams, WaitParams } from "./agent-task-tool-schemas";
 import { createTaskWorkScope } from "./task-work-scope";
 import { taskWorkerModeEnabled, WORKER_GATE_DENIAL_CODE } from "./task-worker-mode";
-import { deliverTaskInbox, hasTaskWakeEvidence, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
+import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
 import { RELAY_LOSS_CODES, taskErrorClass } from "./task-errors";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
 import { createConfiguredTaskCore } from "./configured-task-core";
@@ -151,7 +151,7 @@ export function createConfiguredCoreLoader(factory: ConfiguredCoreFactory): Conf
 	return load;
 }
 
-/** Creates the host-neutral endpoint-owned task runtime using the restart-safe Wolfpack transport by default. */
+/** Creates the host-neutral endpoint-owned task runtime using the memory-owned Wolfpack transport by default. */
 export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | undefined = undefined, createCore: ConfiguredCoreFactory = defaultCoreFactory): AgentTaskRuntime {
 	let inboxContext: AgentTaskRuntimeContext | undefined;
 	let backgroundTimer: ReturnType<typeof setTimeout> | undefined;
@@ -310,11 +310,6 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 	};
 	const recoverRelayLoss = async (context: AgentTaskRuntimeContext, epoch: number, activeCore: TaskCore | undefined): Promise<boolean> => {
 		if (!ownedLoader || lifecycleEpoch !== epoch || inboxContext !== context) return false;
-		// A durable binding failure is not permission to discard assignments or adopt a fresh endpoint.
-		if (activeCore?.recoveryProfile === "restart-safe-v1") {
-			context.ui.setStatus("pi-tasks", context.ui.theme.fg("warning", "tasks: recovery blocked; journal retained, outcome unknown"));
-			return true;
-		}
 		if (relayLossRecovery) { await relayLossRecovery; return true; }
 		const pending = (async (): Promise<void> => {
 			const recoveryEpoch = ++lifecycleEpoch;
@@ -394,27 +389,21 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 		if (COORDINATOR_ONLY_TASK_TOOLS.has(event.toolName)) return { block: true, reason: WORKER_COORDINATION_FORBIDDEN_CODE };
 		try {
 			const activeCore = await configuredCore(context.signal);
-			const evidence = taskEntryEvidence(context.sessionManager);
-			const unconfirmed = unconfirmedPresentationTasks(activeCore, evidence);
-			const assignments = assignedWorkerTasks(activeCore, evidence).filter(task => !unconfirmed.includes(task.taskId));
+			const assignments = assignedWorkerTasks(activeCore, taskEntryEvidence(context.sessionManager));
 			const taskId = inputTaskId(event.input);
-			const denial = () => unconfirmed.some(id => taskId === undefined || id === taskId)
-				? { block: true as const, reason: `${WORKER_GATE_DENIAL_CODE}: TASK_PRESENTATION_UNCONFIRMED; prior harness consumption is unknown for ${JSON.stringify(unconfirmed.slice(0, 8))}; automatic execution is fenced` }
-				: workerAssignmentDenial();
 			if (event.toolName === "agent_task_done") {
 				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
 				if (assigned === undefined || (!eligibleWorkerTask(assigned, closingTaskIds) && assigned.terminalDelivery.state === "not_submitted" && !closingTaskIds.has(assigned.taskId))) {
-					return denial();
+					return workerAssignmentDenial();
 				}
 				closingTaskIds.add(assigned.taskId);
 				return undefined;
 			}
 			if (event.toolName === "agent_task_message") {
 				const assigned = taskId === undefined ? undefined : assignments.find((task) => task.taskId === taskId);
-				return assigned !== undefined && eligibleWorkerTask(assigned, closingTaskIds) ? undefined : denial();
+				return assigned !== undefined && eligibleWorkerTask(assigned, closingTaskIds) ? undefined : workerAssignmentDenial();
 			}
 			if (assignments.some((task) => eligibleWorkerTask(task, closingTaskIds))) return undefined;
-			if (unconfirmed.length) return denial();
 		} catch {
 			// Authorization evidence unavailable or malformed: fail closed with the stable public reason.
 		}
@@ -451,7 +440,7 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 
 	const tools: AgentTaskToolDefinition[] = [];
 	tools.push(defineTool({
-		name: "agent_task_send", label: "Send Agent Task", description: "Record a task before relay submission; the default journal recovers the same session UUID without replaying tools.", parameters: SendParams,
+		name: "agent_task_send", label: "Send Agent Task", description: "Create a task in this endpoint's RAM and submit its assignment; restart loses active state.", parameters: SendParams,
 		async execute(_id, params, signal) {
 			try {
 				const sent = await (await configuredCore(signal)).createTask({ target: params.to, task: params.task, timeoutMs: params.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS }, signal);
@@ -499,18 +488,16 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 				await refreshInbox(signal);
 				const activeCore = await configuredCore(signal);
 				const tasks = activeCore.listTasks();
-				const unconfirmed = unconfirmedPresentationTasks(activeCore, taskEntryEvidence(context.sessionManager));
-				if (unconfirmed.length) return taskError(new TaskProtocolError("TASK_PRESENTATION_UNCONFIRMED", "prior harness consumption is unknown; protocol state is retained and automatic execution is fenced", { retryable: false, details: { taskIds: unconfirmed } }));
 				return toolResult({ tasks }, `## task inbox\n${tasks.map((task) => `- \`${task.taskId}\`: ${task.status}${receiverAssignment(activeCore, task, context)}`).join("\n") || "- empty"}`);
 			} catch (error) { return taskError(error); }
 		},
 	}));
 	tools.push(defineTool({
-		name: "agent_task_message", label: "Message Agent Task", description: "Record a message intent with stable identity before relay submission.", parameters: MessageParams,
+		name: "agent_task_message", label: "Message Agent Task", description: "Record a message intent in this lifetime before relay submission.", parameters: MessageParams,
 		async execute(_id, params, signal) { try { await (await configuredCore(signal)).submitIntent({ taskId: params.taskId, type: `task.${params.type}`, payload: { message: params.message } }, signal); void requestRefresh(); return toolResult({ taskId: params.taskId }, `## task ${params.type}\n- task: \`${params.taskId}\``); } catch (error) { return taskError(error); } },
 	}));
 	tools.push(defineTool({
-		name: "agent_task_cancel", label: "Cancel Agent Task", description: "Record cancellation with stable identity before relay submission.", parameters: TaskIdParams,
+		name: "agent_task_cancel", label: "Cancel Agent Task", description: "Record cancellation in this lifetime before relay submission.", parameters: TaskIdParams,
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
@@ -529,7 +516,7 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 		async execute(_id, params, signal) { try { await (await configuredCore(signal)).acknowledgeParent(params.taskId, signal); void requestRefresh(); return toolResult({ taskId: params.taskId }, `## task acknowledged\n- task: \`${params.taskId}\``); } catch (error) { return taskError(error); } },
 	}));
 	tools.push(defineTool({
-		name: "agent_task_done", label: "Complete Agent Task", description: "Record a terminal intent with stable identity before relay submission.", parameters: DoneParams,
+		name: "agent_task_done", label: "Complete Agent Task", description: "Record a terminal intent in this lifetime before relay submission.", parameters: DoneParams,
 		async execute(_id, params, signal) {
 			try {
 				const activeCore = await configuredCore(signal);
@@ -611,7 +598,7 @@ function taskDeliveryEvidence(task: TaskSnapshot): TaskDeliveryEvidence {
 
 function deliveryEvidenceText(evidence: TaskDeliveryEvidence): string {
 	const insertion = evidence.piInsertion === "blocked" ? "blocked; retryable" : evidence.piInsertion;
-	return `\n- receiver receipt: ${evidence.receiverReceipt}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
+	return `\n- receiver receipt (RAM): ${evidence.receiverReceipt}\n- Pi insertion: ${insertion}\n- wake acceptance: ${evidence.wakeAcceptance}\n- model execution: ${evidence.modelExecution}`;
 }
 
 function toolResult(details: unknown, markdown: string): AgentTaskToolResult {
@@ -671,7 +658,7 @@ function blockedDeliveryWarning(error: TaskOutboxDeliveryError, target: TaskEndp
 export function outboxFailureStatus(error: unknown): string {
 	if (error instanceof TaskProtocolError) {
 		if (RELAY_LOSS_CODES.has(error.code)) return "tasks: relay state lost; rebinding automatically";
-		if (error.code === "RELAY_PROFILE_REQUIRED") return "tasks: compatible task relay profile required";
+		if (error.code === "RELAY_PROFILE_REQUIRED") return "tasks: compatible memory-owned relay required";
 		if (error.code === "RELAY_AUTH_REQUIRED") return "tasks: Wolfpack authentication required";
 		const operation = error.details?.operation;
 		if (typeof operation === "string") return `tasks: ${taskErrorClass(error.code)} (${error.code}) on ${operation}`;
@@ -692,13 +679,6 @@ function receiverAssignment(core: TaskCore, task: TaskSnapshot, context: Pick<Ag
 	const incorporated = taskEntryEvidence(context.sessionManager).incorporated.get(task.taskId);
 	if (!task.events.some((event) => ASSIGNMENT_EVENTS.has(event.type) && sameEndpoint(event.target, core.endpoint) && incorporated?.has(event.eventId) === true)) return "";
 	return `\n\n## task assignment\n${task.task}`;
-}
-
-function unconfirmedPresentationTasks(core: TaskCore, evidence: TaskEntryEvidence): readonly string[] {
-	if (core.recoveryProfile !== "restart-safe-v1" || !core.hasPresentationAttempt) return [];
-	return core.listTasks().filter(task => task.status === "active" && task.terminalDelivery.state === "not_submitted" && sameEndpoint(task.target, core.endpoint)
-		&& task.events.some(event => ASSIGNMENT_EVENTS.has(event.type) && sameEndpoint(event.target, core.endpoint)
-			&& core.hasPresentationAttempt!(task.taskId, event.eventId) && !hasTaskWakeEvidence(evidence, task.taskId, event.eventId))).map(task => task.taskId);
 }
 
 /** Session evidence is memoized; tasks are read fresh on every call so the gate follows current task state. */

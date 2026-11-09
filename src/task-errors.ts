@@ -46,10 +46,7 @@ export const TASK_ERRORS: Readonly<Record<string, TaskErrorSpec>> = {
 	PI_TASK_WORKER_ASSIGNMENT_REQUIRED: { class: "auth", retryable: false, message: "worker tools require an active assignment" },
 	PI_TASK_WORKER_COORDINATION_FORBIDDEN: { class: "auth", retryable: false, message: "workers cannot coordinate other tasks" },
 	// relay and task state
-	TASK_STORAGE_INVALID: { class: "state", retryable: false, message: "task journal validation failed" },
-	TASK_STORAGE_BUSY: { class: "state", retryable: true, message: "another process owns this task journal" },
-	TASK_STORAGE_UNCERTAIN: { class: "state", retryable: false, message: "task journal commit outcome is unknown; reopen and inspect the stable task ID" },
-	TASK_PRESENTATION_UNCONFIRMED: { class: "state", retryable: false, message: "prior harness presentation has no authoritative outcome; automatic execution is fenced" },	RELAY_RESET: { class: "state", retryable: false, resetsBinding: true, relayLoss: true, message: "relay lifetime was reset" },
+	RELAY_RESET: { class: "state", retryable: false, resetsBinding: true, relayLoss: true, message: "relay lifetime was reset" },
 	RELAY_REBIND_REQUIRED: { class: "state", retryable: false, relayLoss: true, message: "relay binding must be replaced" },
 	RELAY_STATE_LOST: { class: "state", retryable: false, message: "relay task state was lost" },
 	REGISTRATION_EXPIRED: { class: "state", retryable: false, resetsBinding: true, message: "relay registration expired" },
@@ -76,7 +73,7 @@ export const TASK_ERRORS: Readonly<Record<string, TaskErrorSpec>> = {
 	UNREGISTERED_SOURCE: { class: "delivery", retryable: true, message: "source is not registered for this protocol" },
 	UNKNOWN_RELAY: { class: "delivery", retryable: true, message: "target belongs to another relay" },
 	// protocol
-	RELAY_PROFILE_REQUIRED: { class: "protocol", retryable: false, message: "compatible task relay profile required" },
+	RELAY_PROFILE_REQUIRED: { class: "protocol", retryable: false, message: "compatible memory-owned relay required" },
 	INCOMPATIBLE_PROTOCOL: { class: "protocol", retryable: false, message: "incompatible task protocol" },
 	INVALID_REQUEST: { class: "protocol", retryable: false, message: "relay rejected the request as invalid" },
 	INVALID_CONNECTION: { class: "protocol", retryable: true, message: "relay connected a different endpoint" },

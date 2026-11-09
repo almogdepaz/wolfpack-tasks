@@ -1,4 +1,21 @@
-# restart-safe task recovery
+# relay-first recovery — current approved scope
+
+## current phase ledger (supersedes all historical gates below)
+
+- task `55b70a9a-2eff-4e50-82d4-24f59a1d2af9`; sole production writer session `96688f30-4e52-4aa4-add7-b97a2535be46`; parent independently reviews. no delegation.
+- approved goal: server/relay restart with the same live RAM-only plugin processes, semantic task store and outbox. at-least-once transport with stable IDs, not exactly-once model execution.
+- exclude endpoint/plugin-process recovery, plugin SQLite/journal, Pi identity/transcript changes, durable presentation reservations, new Claude interrupted-MCP policy and distributed endpoint-history GC.
+- preserve baseline `volatile-v1` wire interface; server SQLite storage is independent of endpoint durability. no installs, deployment, live migrations, merges or force pushes.
+- Wolfpack base `370fde0f481a067baa76a878fe8a0b3d49096eba`, starting HEAD `6a71594237d1e7f957d425f52138a74c2f5f46ab`, branch `recovery/restart-safe-relay`; draft https://github.com/almogdepaz/wolfpack/pull/482.
+- tasks base `015a0311add9c853d0d93c912546ca61e483a51f`, starting HEAD `c46c5e327603503feb80d9492a7ba3cbd46fb685`, branch `recovery/restart-safe-tasks`; draft https://github.com/almogdepaz/wolfpack-tasks/pull/31.
+- exact cancelled-scope dirty snapshots and patch: `/tmp/relay-first-55b70a9a.wQWAXV`; earlier broader production work remains in git history. restore only abandoned-scope differences, not unrelated changes.
+- phase: relay-first source review checkpoint. baseline client compatibility red (`RELAY_PROFILE_REQUIRED`) is fixed without client upgrade. same live RAM controller/store plus production inbox dispatcher survives actual SIGKILL server/worker restarts, lost send/ACK and a 61-second outage, with one assignment/wake; trusted forwarding survives one/both host process restarts.
+- focused evidence: `/tmp/relay-first-55b70a9a.wQWAXV/` contains full logs and command/cwd/revision/dirty/exit/duration metadata. `relay-final-faults`: 25 pass; `client-final-focused`: 74 pass; `server-contracts-focused`: 51 pass/2 optional skips; separately `trusted-live-process-green3`: 1 pass; `live-dispatch-green2`: 1 pass (30 assertions); `new-client-old-server`: 2 pass. both typechecks and schema/Claude generation exit 0. final pinned clean-source process checks follow the code checkpoints.
+- baseline-isolated limits: `tests/endpoint-extension-corrections.test.ts` reports the same 22 pass/3 fail on tasks base and candidate (`baseline-endpoint-corrections` / `candidate-endpoint-corrections`). failures are existing polling count and incomplete fake-endpoint fixtures, not fixed here. no full repo suites run.
+- review question sent on this task: different-generation reconnect still fails closed even for an empty old registration. proposal permits replacement only after fresh canonical UUID proof and zero outstanding obligations; no change pending parent review. plugin-process recovery remains excluded.
+- final full suites and readiness require parent coordination/approval. commits/pushes to these existing branches authorized; both PRs stay draft.
+
+## historical broad-scope record — not current authority
 
 ## current authority and lifecycle
 

@@ -7,7 +7,6 @@ import type { TaskStore } from "./task-store";
 import { fromWolfpackEnvelope, toWolfpackEnvelope, WOLFPACK_TASK_RELAY_ID } from "./wolfpack-task-relay";
 
 export const VOLATILE_PROFILE = "volatile-v1";
-export const RESTART_SAFE_PROFILE = "restart-safe-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CURSOR = /^(0|[1-9][0-9]{0,31})$/;
 
@@ -15,7 +14,7 @@ export interface VolatileTaskSessionOptions {
   /** Explicit trusted endpoint ingress URL. No default route or installed server. */
   readonly url: string;
   readonly callerSession: string;
-  /** Caller owns this endpoint's state and closes it after session.close(). */
+  /** Caller owns this endpoint's RAM state and closes it after session.close(). */
   readonly store: TaskStore;
   readonly fetch?: typeof fetch;
   readonly requestTimeoutMs?: number;
@@ -30,28 +29,19 @@ export interface VolatileTaskSession {
 
 /** Epoch-bound transport used by the normal extension; caller owns the store. */
 export function createVolatileTaskSession(options: VolatileTaskSessionOptions): VolatileTaskSession {
-  return createBoundTaskSession(options, VOLATILE_PROFILE);
-}
-export function createRestartSafeTaskSession(options: VolatileTaskSessionOptions): VolatileTaskSession {
-  if (options.store.durability !== RESTART_SAFE_PROFILE) throw new TypeError("restart-safe transport requires a durable endpoint journal");
-  return createBoundTaskSession(options, RESTART_SAFE_PROFILE);
-}
-function createBoundTaskSession(options: VolatileTaskSessionOptions, profile: RelayTransportBinding["profile"]): VolatileTaskSession {
   const url = new URL(options.url);
   if (url.username || url.password || url.search || url.hash || !(url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname)))) throw new TypeError("explicit trusted HTTPS or loopback relay URL required");
   if (!text(options.callerSession)) throw new TypeError("caller session is required");
   const timeoutMs = options.requestTimeoutMs ?? 12_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15_000) throw new TypeError("invalid relay request deadline");
   const requestFetch = options.fetch ?? fetch, store = options.store;
-  if (profile === RESTART_SAFE_PROFILE && !UUID.test(options.callerSession)) throw new TypeError("restart-safe tasks require the authoritative session UUID");
   let transport: Transport | undefined, core: TaskCore | undefined, busy = false, closed = false;
   let reset = false;
   const saved = () => store.getRelayTransportBinding();
   const validateSaved = (binding: RelayTransportBinding) => {
-    if (binding.profile !== profile || !UUID.test(binding.epoch) || !localEndpoint(binding.endpoint)
+    if (binding.profile !== VOLATILE_PROFILE || !UUID.test(binding.epoch) || !localEndpoint(binding.endpoint)
       || !text(binding.generation) || typeof binding.url !== "string" || !text(binding.callerSession) || (binding.reset !== undefined && binding.reset !== true)
-      || !same(store.getEndpointBinding(), binding.endpoint)
-      || (profile === RESTART_SAFE_PROFILE && (!UUID.test(binding.generation) || store.getEndpointGeneration() !== binding.generation || binding.callerSession !== options.callerSession))) throw failure("INVALID_RELAY_METADATA", false);
+      || !same(store.getEndpointBinding(), binding.endpoint)) throw failure("INVALID_RELAY_METADATA", false);
   };
   const quarantine = (prior: TaskEndpoint | undefined, code: string) => {
     if (!prior) return;
@@ -76,7 +66,6 @@ function createBoundTaskSession(options: VolatileTaskSessionOptions, profile: Re
       let prior = saved(), priorEndpoint = store.getEndpointBinding();
       if (prior) validateSaved(prior);
       if (!replace && (reset || prior?.reset || (!prior && priorEndpoint) || (prior && (prior.url !== url.href || prior.callerSession !== options.callerSession)))) { reset = true; throw failure("RELAY_REBIND_REQUIRED", false); }
-      if (replace && profile === RESTART_SAFE_PROFILE) throw failure("RELAY_RESET", false, { recovery: "journal retained; authoritative binding requires investigation" });
       if (replace) {
         // Explicit acceptance of loss starts empty. Session history is the only
         // archive; old task identities/ACKs/outbox must never enter the new scope.
@@ -86,7 +75,7 @@ function createBoundTaskSession(options: VolatileTaskSessionOptions, profile: Re
       const expectedBinding = saved();
       const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
       store.transaction(() => store.setEndpointGeneration(generation));
-      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, profile);
+      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset);
       transport = selected;
       const binding = await selected.register(signal);
       if (closed) throw failure("RELAY_CLOSED", false);
@@ -101,7 +90,7 @@ function createBoundTaskSession(options: VolatileTaskSessionOptions, profile: Re
       });
       reset = false;
       // Retained old core handles cannot mutate a successor lifetime even if
-      // they resume after await. The store remains controller-owned.
+      // they resume after await. The RAM store remains controller-owned.
       const guard = () => selected.assertStoredBinding(saved());
       const guarded: TaskStore = { ...store, transaction<T>(operation: () => T): T {
         guard();
@@ -135,7 +124,7 @@ class Transport {
   private active = 0;
   private readonly waiters: Array<{ reserved: boolean; grant(): void }> = [];
   constructor(private url: string, private caller: string, private generation: string, prior: RelayTransportBinding | undefined,
-    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void, private profile: RelayTransportBinding["profile"]) { this.binding = prior; }
+    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void) { this.binding = prior; }
   stop(): void { this.stopSignal.abort(); }
   assertActive(): void { if (this.stopSignal.signal.aborted) throw failure("RELAY_RESET", false, { mayHaveBeenDelivered: true }); }
   assertStoredBinding(binding: RelayTransportBinding | undefined): void {
@@ -148,13 +137,12 @@ class Transport {
     if (this.binding && this.expiresAt - Date.now() > this.timeoutMs + 10_000) return this.binding;
     if (this.renewing) return this.renewing;
     this.renewing = (async () => {
-      const reply = await this.request({ operation: "connect", profile: this.profile, callerSession: this.caller, generation: this.generation,
+      const reply = await this.request({ operation: "connect", profile: VOLATILE_PROFILE, callerSession: this.caller, generation: this.generation,
         protocolVersions: [2], leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
       const value = reply.value;
       if (!record(value) || value.kind !== "connected" || !localEndpoint(value.endpoint) || typeof value.leaseExpiresAt !== "string" || !(Date.parse(value.leaseExpiresAt) > Date.now())) throw failure("INVALID_CONNECTION", true);
-      if (this.profile === RESTART_SAFE_PROFILE && value.sessionId !== this.caller) throw failure("SOURCE_MISMATCH", false);
       if (this.binding && !same(this.binding.endpoint, value.endpoint)) this.retire();
-      this.binding = Object.freeze({ profile: this.profile, epoch: reply.epoch, endpoint: Object.freeze({ ...value.endpoint }), generation: this.generation, callerSession: this.caller, url: this.url });
+      this.binding = Object.freeze({ profile: VOLATILE_PROFILE, epoch: reply.epoch, endpoint: Object.freeze({ ...value.endpoint }), generation: this.generation, callerSession: this.caller, url: this.url });
       this.expiresAt = Math.min(Date.parse(value.leaseExpiresAt), Date.now() + 60_000);
       return this.binding;
     })();
@@ -256,10 +244,6 @@ class Transport {
         if (controller.signal.aborted) throw abortError();
         const response = await this.fetcher(this.url, { method: "POST", headers: { "content-type": "application/json" }, body: encoded, redirect: "error", signal: controller.signal });
         if (controller.signal.aborted) { void response.body?.cancel().catch(() => undefined); throw abortError(); }
-        if (this.profile === RESTART_SAFE_PROFILE && response.status === 404) {
-          void response.body?.cancel().catch(() => undefined);
-          throw failure("RELAY_PROFILE_REQUIRED", false);
-        }
         const rateLimited = response.status === 429;
         if (response.status === 401 || rateLimited) {
           // Admission failures need no relay profile. Best-effort cleanup must not mask their status.
@@ -287,25 +271,21 @@ class Transport {
       const data = result.value;
       // An explicit permanent profile refusal retires an existing lifetime even
       // when the selected server engine has no volatile epoch to return.
-      if (record(data) && (data.profile === VOLATILE_PROFILE || data.profile === RESTART_SAFE_PROFILE || data.profile === "durable-v2")
+      if (record(data) && (data.profile === VOLATILE_PROFILE || data.profile === "durable-v2")
         && data.ok === false && record(data.error) && data.error.code === "RELAY_PROFILE_REQUIRED" && data.error.retryable === false) {
         if (this.binding) this.retire();
         throw failure("RELAY_PROFILE_REQUIRED", false);
       }
-      if (!record(data) || data.profile !== this.profile) throw failure("RELAY_PROFILE_REQUIRED", false);
+      if (!record(data) || data.profile !== VOLATILE_PROFILE) throw failure("RELAY_PROFILE_REQUIRED", false);
       if (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch) this.retire();
       if (data.ok === false && record(data.error) && text(data.error.code) && typeof data.error.retryable === "boolean") {
-        if (this.profile === RESTART_SAFE_PROFILE && data.error.code === "REGISTRATION_EXPIRED") {
-          // No operation was admitted. Renew the same persisted generation on the next pass.
-          this.expiresAt = 0;
-          throw failure("RELAY_UNAVAILABLE", true);
-        }
         if (RESET_CODES.has(data.error.code)) this.retire();
-        const ownerFailure = this.profile === RESTART_SAFE_PROFILE && data.error.ownerFatal === true
+        const ownerFailure = data.error.ownerFatal === true
           && ["RELAY_STORAGE_BUSY", "RELAY_STORAGE_UNAVAILABLE", "RELAY_STORAGE_INVALID", "RELAY_STORAGE_UNCERTAIN", "RELAY_STORAGE_RECOVERY_BLOCKED"].includes(data.error.code);
-        const ownerCooldown = this.profile === RESTART_SAFE_PROFILE && data.error.code === "RELAY_STORAGE_RECOVERING"
-          && data.error.retryable === true && typeof data.error.retryAfterMs === "number" && data.error.retryAfterMs > 0;
-        const epochlessRejection = data.epoch === undefined && (ownerFailure || ownerCooldown || ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code));
+        const ownerCooldown = data.error.code === "RELAY_STORAGE_RECOVERING" && data.error.retryable === true
+          && typeof data.error.retryAfterMs === "number" && Number.isFinite(data.error.retryAfterMs) && data.error.retryAfterMs > 0;
+        const epochlessRejection = data.epoch === undefined && (ownerFailure || ownerCooldown
+          || ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code));
         if ((!uuid(data.epoch) && !epochlessRejection) || (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch)) throw failure("INVALID_RESPONSE", true);
         const details = { ...(ownerFailure && { ownerFatal: true }), ...((data.error.mayHaveBeenDelivered === true || data.error.code === "RELAY_UNAVAILABLE") && { mayHaveBeenDelivered: true }),
           ...(typeof data.error.retryAfterMs === "number" && Number.isFinite(data.error.retryAfterMs) && data.error.retryAfterMs >= 0 && { retryAfterMs: data.error.retryAfterMs }) };

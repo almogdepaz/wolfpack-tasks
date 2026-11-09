@@ -156,8 +156,7 @@ async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, 
 	if (hasAcknowledgedLocalOriginTerminal(core, event)) { await recordInsertion(); return true; }
 	if (!context.isIdle()) { await recordInsertion(); return false; }
 	// This synchronous local write closes the ACK/wake race; do not await relay I/O before Pi emits the wake.
-	const wakeRequest = core.recordWakeRequest(eventDetails, receipts?.work);
-	if (wakeRequest.outcome === "unconfirmed") throw new TaskProtocolError("TASK_PRESENTATION_UNCONFIRMED", "a prior wake attempt has no durable harness outcome; automatic execution is fenced", { retryable: false, details: eventDetails });
+	const wakeRequest = receipts && core.recordWakeRequest(eventDetails, receipts.work);
 	let wakeAccepted = false;
 	try {
 		pi.sendMessage({
@@ -167,22 +166,12 @@ async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, 
 			details: eventDetails,
 		}, { triggerTurn: true, deliverAs: "followUp" });
 		wakeAccepted = taskEntryEvidence(context.sessionManager).wakes.has(eventKey);
-	} catch (error) {
-		if (core.recoveryProfile === "restart-safe-v1") {
-			const failure = new TaskProtocolError("TASK_PRESENTATION_UNCONFIRMED", "harness wake emission failed with an unknown outcome; automatic retry is fenced", { retryable: false, details: eventDetails });
-			failure.cause = error; throw failure;
-		}
-		throw error;
 	} finally {
-		// A durable attempted emission is uncertain, not provably unsent. Keep its reservation.
-		if (!wakeAccepted && core.recoveryProfile !== "restart-safe-v1") wakeRequest.discard();
+		// An unaccepted or throwing wake must not leave a wake_accepted record for the outbox flush.
+		if (!wakeAccepted) wakeRequest?.discard();
 	}
-	if (!wakeAccepted) {
-		await recordInsertion();
-		if (core.recoveryProfile === "restart-safe-v1") throw new TaskProtocolError("TASK_PRESENTATION_UNCONFIRMED", "harness wake was emitted without durable acceptance evidence; automatic retry is fenced", { retryable: false, details: eventDetails });
-		return false;
-	}
-	if (receipts) await wakeRequest.flush(receipts.signal);
+	if (!wakeAccepted) { await recordInsertion(); return false; }
+	if (receipts && wakeRequest) await wakeRequest.flush(receipts.signal);
 	return true;
 }
 
@@ -292,10 +281,6 @@ function indexEntry(memo: EntryMemo, entry: unknown): void {
 
 function isTaskEvent(value: unknown): value is TaskEvent {
 	return isRecord(value) && typeof value.eventId === "string" && typeof value.taskId === "string" && typeof value.type === "string" && typeof value.sequence === "string" && isRecord(value.source) && isRecord(value.target) && typeof value.occurredAt === "number" && isRecord(value.payload);
-}
-
-export function hasTaskWakeEvidence(evidence: TaskEntryEvidence, taskId: string, eventId: string): boolean {
-	return evidence.wakes.has(key(taskId, eventId));
 }
 
 function key(taskId: string, eventId: string): string {

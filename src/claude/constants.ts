@@ -30,8 +30,10 @@ export const CLAUDE_PLUGIN = Object.freeze({
 	fallbackProtocolVersion: "2025-11-25",
 	/** State-directory-relative status file directory. */
 	statusDirectory: "wolfpack-tasks/claude",
-	/** Worker gate state lives beside the status file as `<WOLFPACK_SESSION_ID><gateFileSuffix>`. */
-	gateFileSuffix: ".gate.json",
+	/** The worker gate socket lives in this mode-0700 subdirectory of the status directory as `<hash>.sock`. */
+	gateSocketDirectory: "gate",
+	/** Hex characters of the session id's SHA-256 in the gate socket name. */
+	gateSocketHashChars: 16,
 });
 
 /** Claude Code harness tools a worker may use before its assignment: ToolSearch loads the deferred task tools. */

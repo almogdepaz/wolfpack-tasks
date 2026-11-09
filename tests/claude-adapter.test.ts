@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { CLAUDE_PLUGIN } from "../src/claude/constants";
+import { readClaudeEnvironment } from "../src/claude/environment";
+import { queryWorkerGate } from "../src/claude/worker-gate";
 import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import type { TaskCore } from "../src/task-core";
@@ -12,7 +14,6 @@ import { runTaskRelayConformance } from "../src/task-relay-conformance";
 import { WORKER_COORDINATION_FORBIDDEN_CODE, WORKER_GATE_DENIAL_CODE } from "../src/agent-task-runtime";
 import { SESSION_ID, sequence, startHarness, waitFor, wolfpackEnv } from "./claude-harness";
 import type { Harness } from "./claude-harness";
-import type { WakeTimers } from "../src/claude/wake";
 
 const META_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const noCommands = async (): Promise<never> => { throw new Error("unexpected command"); };
@@ -29,15 +30,15 @@ afterEach(async () => {
 	delete process.env.WOLFPACK_TASK_WORKER;
 });
 
-async function fixture(options: { worker?: boolean; timers?: WakeTimers } = {}) {
+async function fixture(options: { worker?: boolean; env?: Record<string, string | undefined> } = {}) {
 	if (options.worker) process.env.WOLFPACK_TASK_WORKER = "1";
 	const relay = claudePathRelay();
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
 	const worker = createTaskCore({ endpoint: { relay: "memory", id: "worker" }, relay, store: createTaskStore(), ids: sequence("worker") });
 	await origin.connect();
 	await worker.connect();
-	const env = wolfpackEnv();
-	const harness = startHarness({ env, core: worker, runCommand: noCommands, ...(options.timers && { timers: options.timers }) });
+	const env = options.env ?? wolfpackEnv();
+	const harness = startHarness({ env, core: worker, runCommand: noCommands });
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
@@ -191,59 +192,67 @@ test("a buffered relay-loss note does not suppress the wake for a later assignme
 	expect(inbox).toContain("assignment after the reset");
 });
 
-const gateState = (env: Record<string, string | undefined>): Record<string, unknown> | undefined => {
-	const path = join(env.WOLFPACK_DIR!, CLAUDE_PLUGIN.statusDirectory, `${SESSION_ID}${CLAUDE_PLUGIN.gateFileSuffix}`);
-	return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown> : undefined;
+const gateSocket = (env: Record<string, string | undefined>): string => {
+	const environment = readClaudeEnvironment(env);
+	if (environment.kind !== "ready") throw new Error(`environment is ${environment.kind}`);
+	return environment.gateSocketPath;
 };
+const queryGate = (env: Record<string, string | undefined>) => queryWorkerGate(gateSocket(env), { sessionId: SESSION_ID, toolName: "Bash" });
 
-test("a worker server writes gate state before each tool result and revokes it on completion and shutdown", async () => {
+test("a worker server answers the gate socket from its current decision and closes and unlinks it on shutdown", async () => {
 	const { origin, worker, harness, env } = await fixture({ worker: true });
-	expect(gateState(env)).toMatchObject({ sessionId: SESSION_ID, pid: process.pid, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
-	const path = join(env.WOLFPACK_DIR!, CLAUDE_PLUGIN.statusDirectory, `${SESSION_ID}${CLAUDE_PLUGIN.gateFileSuffix}`);
-	expect(statSync(path).mode & 0o777).toBe(0o600);
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
 
 	const taskId = await assign(origin, worker, harness, "gated assignment");
 	await waitFor(() => pointers(harness).length === 1);
 	await harness.callTool("agent_task_inbox");
-	const open = gateState(env)!;
-	expect(open).toMatchObject({ authorized: true, reason: null });
-	expect(open.expiresAt as number).toBeGreaterThan(Date.now());
-	expect(open.expiresAt as number).toBeLessThanOrEqual((open.evaluatedAt as number) + 10_000);
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: true, reason: null });
 
 	await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
-	expect(gateState(env)).toMatchObject({ authorized: false });
+	expect(await queryGate(env)).toMatchObject({ ok: true, authorized: false });
 
 	await harness.server.shutdown();
-	expect(gateState(env)).toMatchObject({ authorized: false, reason: expect.stringContaining("stopped") });
+	expect(existsSync(gateSocket(env))).toBe(false);
+	expect(await queryGate(env)).toEqual({ ok: false, detail: expect.stringContaining("task server socket is missing") });
 });
 
-test("an ordinary server writes no gate state", async () => {
+test("the gate answer follows a parent cancellation without a task tool call", async () => {
+	const { origin, worker, harness, env } = await fixture({ worker: true });
+	const taskId = await assign(origin, worker, harness, "cancelled assignment");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	expect(await queryGate(env)).toMatchObject({ ok: true, authorized: true });
+	await origin.submitIntent({ taskId, type: "task.cancelled", payload: {} });
+	await harness.hook({ event: "stop" });
+	await waitFor(async () => (await queryGate(env)).ok && !(await queryGate(env) as { authorized: boolean }).authorized);
+});
+
+test("an ordinary server opens no gate socket", async () => {
 	const { origin, worker, harness, env } = await fixture();
 	await assign(origin, worker, harness, "ordinary assignment");
 	await waitFor(() => pointers(harness).length === 1);
 	await harness.callTool("agent_task_inbox");
-	expect(gateState(env)).toBeUndefined();
+	expect(existsSync(dirname(gateSocket(env)))).toBe(false);
 });
 
-test("the gate heartbeat re-evaluates and extends the gate state on the injected clock", async () => {
-	let clock = 1_000_000;
-	const due: { at: number; fire: () => void }[] = [];
-	const timers: WakeTimers = {
-		now: () => clock,
-		setTimeout(fire, ms) { const item = { at: clock + ms, fire }; due.push(item); return () => { due.splice(due.indexOf(item), 1); }; },
-	};
-	const { env } = await fixture({ worker: true, timers });
-	expect(gateState(env)).toMatchObject({ authorized: false, evaluatedAt: clock, expiresAt: clock + 10_000 });
-	clock += 2_000;
-	for (const item of due.filter((entry) => entry.at <= clock)) { due.splice(due.indexOf(item), 1); item.fire(); }
-	await waitFor(() => gateState(env)?.evaluatedAt === clock);
-	expect(gateState(env)).toMatchObject({ authorized: false, expiresAt: clock + 10_000 });
-	expect(due.some((entry) => entry.at === clock + 2_000)).toBe(true);
+test("a restarted worker server replaces the stale socket of a killed server", async () => {
+	const env = wolfpackEnv();
+	const path = gateSocket(env);
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	// A killed server's socket: bound, then abandoned without close.
+	const killed = Bun.spawn([process.execPath, "-e", `require("node:net").createServer().listen(${JSON.stringify(path)}, () => console.log("ready"))`], { stdout: "pipe" });
+	await killed.stdout.getReader().read();
+	killed.kill("SIGKILL");
+	await killed.exited;
+	expect(lstatSync(path).isSocket()).toBe(true);
+	expect(await queryGate(env)).toEqual({ ok: false, detail: expect.stringContaining("connection refused") });
+	await fixture({ worker: true, env });
+	expect(await queryGate(env)).toEqual({ ok: true, authorized: false, reason: WORKER_GATE_DENIAL_CODE });
 });
 
 const node = Bun.which("node");
 
-test.skipIf(!node)("the bundled gate hook reads the state the adapter writes: allow while assigned, deny after completion", async () => {
+test.skipIf(!node)("the bundled gate hook asks the running server: deny before assignment, allow while assigned, deny after completion and shutdown", async () => {
 	const { origin, worker, harness, env } = await fixture({ worker: true });
 	const runGate = async (): Promise<{ exitCode: number; stderr: string }> => {
 		const child = Bun.spawn([node!, join(import.meta.dir, "..", "claude-plugin", CLAUDE_PLUGIN.gateBundle)], {
@@ -262,4 +271,7 @@ test.skipIf(!node)("the bundled gate hook reads the state the adapter writes: al
 	expect(await runGate()).toEqual({ exitCode: 0, stderr: "" });
 	await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
 	expect((await runGate()).exitCode).toBe(2);
+	await harness.callTool("agent_task_inbox");
+	await harness.server.shutdown();
+	expect(await runGate()).toMatchObject({ exitCode: 2, stderr: expect.stringContaining("task server socket is missing") });
 }, 15_000);

@@ -11,7 +11,8 @@ import { createStatusFile } from "./status-file";
 import type { ClaudeStatusFile } from "./status-file";
 import { validateToolArguments } from "./validation";
 import { createWakeController } from "./wake";
-import { WORKER_GATE_FILE_VERSION, WORKER_GATE_HEARTBEAT_MS, WORKER_GATE_TTL_MS, writeWorkerGateState } from "./worker-gate";
+import { listenWorkerGate, WORKER_GATE_ANSWER_WAIT_MS } from "./worker-gate";
+import type { WorkerGateAnswer, WorkerGateListener } from "./worker-gate";
 import type { CommandRunner, WakeController, WakeTimers, WakeTiming } from "./wake";
 
 export interface McpToolResult {
@@ -129,25 +130,23 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 		: createAgentTaskRuntime(host, undefined, async (signal, rebind) => observeIntake(await createCore(signal, rebind)) as Awaited<ReturnType<ConfiguredCoreFactory>>);
 	const tools = new Map(runtime.tools.map((tool) => [tool.name, tool]));
 
-	// Worker mode only: the gate state that the fail-closed PreToolUse command hook reads (see worker-gate.ts).
+	// Worker mode only: the gate decision that the fail-closed PreToolUse command hook asks for over the gate socket
+	// (see worker-gate.ts). It lives only in this process, so no answer can come from a previous server lifetime.
 	const gateEnabled = runtime.workerGateEnabled;
+	const GATE_STOPPED: WorkerGateAnswer = { authorized: false, reason: `${WORKER_GATE_DENIAL_CODE}: the wolfpack-tasks MCP server stopped` };
+	let gateAnswer: WorkerGateAnswer = { authorized: false, reason: `${WORKER_GATE_DENIAL_CODE}: the worker gate has not been evaluated` };
+	let gateListener: WorkerGateListener | undefined;
 	let gateQueue: Promise<void> = Promise.resolve();
-	let cancelGateBeat: (() => void) | undefined;
-	let gateWriteFailed = false;
-	const writeGate = (authorized: boolean, reason: string | null): void => {
-		const now = options.timers.now();
-		const written = writeWorkerGateState(environment.gatePath, {
-			version: WORKER_GATE_FILE_VERSION, sessionId: environment.sessionId, pid: process.pid, parentPid: process.ppid,
-			authorized, reason, evaluatedAt: now, expiresAt: now + WORKER_GATE_TTL_MS,
-		});
-		// The writer removes the file on failure, so the hook denies; report the first failure of a streak.
-		if (!written && !gateWriteFailed) options.log(`wolfpack-tasks: worker gate state write failed: ${environment.gatePath}`);
-		gateWriteFailed = !written;
-	};
-	/** Re-evaluates the gate. Serialized, so an older evaluation never overwrites a newer one. */
+	let queuedGateRefresh: Promise<void> | undefined;
+	/**
+	 * Re-evaluates the gate. Serialized, so an older evaluation never overwrites a newer one. A refresh that has not
+	 * started yet is shared: it still runs after every earlier change, and a hung evaluation cannot grow the queue.
+	 */
 	const refreshGate = (): Promise<void> => {
 		if (!gateEnabled) return gateQueue;
-		gateQueue = gateQueue.then(async () => {
+		if (queuedGateRefresh) return queuedGateRefresh;
+		const run = gateQueue.then(async () => {
+			queuedGateRefresh = undefined;
 			if (closed) return;
 			let decision: { readonly block: boolean; readonly reason: string } | undefined;
 			try {
@@ -155,13 +154,19 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			} catch (error) {
 				decision = { block: true, reason: error instanceof Error ? error.message : String(error) };
 			}
-			if (!closed) writeGate(decision?.block !== true, decision?.block ? decision.reason : null);
+			gateAnswer = decision?.block ? { authorized: false, reason: decision.reason } : { authorized: true, reason: null };
 		});
-		return gateQueue;
+		queuedGateRefresh = run;
+		gateQueue = run;
+		return run;
 	};
-	/** A hung or stopped server stops this heartbeat, so its last state expires after WORKER_GATE_TTL_MS. */
-	const scheduleGateBeat = (): void => {
-		cancelGateBeat = options.timers.setTimeout(() => { void refreshGate().then(() => { if (!closed) scheduleGateBeat(); }); }, WORKER_GATE_HEARTBEAT_MS);
+	/** Answers one hook request: a fresh evaluation when it completes in time, otherwise the latest one. */
+	const answerGate = async (): Promise<WorkerGateAnswer> => {
+		if (closed) return GATE_STOPPED;
+		let cancelWait: (() => void) | undefined;
+		await Promise.race([refreshGate(), new Promise<void>((resolve) => { cancelWait = options.timers.setTimeout(resolve, WORKER_GATE_ANSWER_WAIT_MS); })]);
+		cancelWait?.();
+		return closed ? GATE_STOPPED : gateAnswer;
 	};
 
 	const executeTool = async (name: string, args: unknown, signal: AbortSignal): Promise<McpToolResult> => {
@@ -225,7 +230,10 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			await runtime.lifecycle.session_start({}, context);
 			if (gateEnabled && !closed) {
 				await refreshGate();
-				scheduleGateBeat();
+				const listener = await listenWorkerGate({ path: environment.gateSocketPath, sessionId: environment.sessionId, answer: answerGate, log: options.log });
+				// A shutdown during listen did not see this listener.
+				if (closed) await listener?.close();
+				else gateListener = listener;
 			}
 		},
 		async callTool(name, args, signal) {
@@ -264,11 +272,8 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 			if (closed) return;
 			closed = true;
 			wake?.close();
-			cancelGateBeat?.();
-			if (gateEnabled && started) {
-				await gateQueue;
-				writeGate(false, `${WORKER_GATE_DENIAL_CODE}: the wolfpack-tasks MCP server stopped`);
-			}
+			await gateListener?.close();
+			gateListener = undefined;
 			await runtime.lifecycle.session_shutdown({}, context);
 		},
 	};

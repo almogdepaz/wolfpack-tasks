@@ -10,7 +10,16 @@ export const SESSION_ID = "0b6f3a52-6a39-4c55-9a0e-1c2d3e4f5a6b";
 
 /** Wolfpack identity plus an isolated state directory. */
 export function wolfpackEnv(overrides: Readonly<Record<string, string | undefined>> = {}): Record<string, string | undefined> {
-	return { WOLFPACK_SESSION_ID: SESSION_ID, WOLFPACK_SESSION_NAME: "claude-worker", WOLFPACK_DIR: mkdtempSync(join(tmpdir(), "wolfpack-tasks-claude-")), HOME: "/home/test", ...overrides };
+	return { WOLFPACK_SESSION_ID: SESSION_ID, WOLFPACK_SESSION_NAME: "claude-worker", WOLFPACK_DIR: shortTempDir("wpt-claude-"), HOME: "/home/test", ...overrides };
+}
+
+/**
+ * A new temporary directory short enough to hold the worker gate socket: unix socket paths are limited to 103 bytes on
+ * macOS, and the macOS per-user temporary directory (/var/folders/...) leaves too little room.
+ */
+export function shortTempDir(prefix = "wpt-"): string {
+	const root = tmpdir().length <= 24 ? tmpdir() : "/tmp";
+	return mkdtempSync(join(root, prefix));
 }
 
 export interface Harness {

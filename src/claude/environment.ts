@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 
 import { CLAUDE_PLUGIN } from "./constants";
@@ -12,7 +13,7 @@ export type ClaudeEnvironment =
 	| { readonly kind: "inactive" }
 	/** Wolfpack identity is present but a required value is missing or invalid. */
 	| { readonly kind: "misconfigured"; readonly variable: string; readonly reason: string }
-	| { readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string; readonly gatePath: string };
+	| { readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string; readonly gateSocketPath: string };
 
 /**
  * The identity gate is exactly WOLFPACK_SESSION_ID plus WOLFPACK_SESSION_NAME. With identity present, the values the
@@ -36,7 +37,16 @@ export function readClaudeEnvironment(env: Readonly<Record<string, string | unde
 		stateDir = join(env.HOME, ".wolfpack");
 	}
 	const directory = join(stateDir, CLAUDE_PLUGIN.statusDirectory);
-	return { kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(directory, `${sessionId}.json`), gatePath: join(directory, `${sessionId}${CLAUDE_PLUGIN.gateFileSuffix}`) };
+	return { kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(directory, `${sessionId}.json`), gateSocketPath: gateSocketPath(directory, sessionId) };
+}
+
+/**
+ * The worker gate socket of a session. A session id can be 128 characters, so the file name is a short hash of it: unix
+ * socket paths are limited to 103 bytes on macOS. A longer path is refused by both the server and the hook.
+ */
+function gateSocketPath(directory: string, sessionId: string): string {
+	const name = createHash("sha256").update(sessionId).digest("hex").slice(0, CLAUDE_PLUGIN.gateSocketHashChars);
+	return join(directory, CLAUDE_PLUGIN.gateSocketDirectory, `${name}.sock`);
 }
 
 function misconfigured(variable: string, reason: string): ClaudeEnvironment {

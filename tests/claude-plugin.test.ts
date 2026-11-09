@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { buildClaudeBundle, buildWorkerGateBundle, PLUGIN_ROOT, SKILL_COPY, SKILL_SOURCE } from "../scripts/build-claude";
 import { createClaudeTaskServer, SERVER_VERSION } from "../src/claude/mcp-server";
 import { LIFECYCLE_HOOK_EVENTS } from "../src/claude/adapter";
 import { CLAUDE_PLUGIN } from "../src/claude/constants";
+import { readClaudeEnvironment } from "../src/claude/environment";
+import { listenWorkerGate } from "../src/claude/worker-gate";
+import { shortTempDir } from "./claude-harness";
 import type { JsonRpcMessage } from "../src/claude/json-rpc";
 import packageJson from "../package.json";
 
@@ -151,20 +154,44 @@ describe("worker gate bundle under node", () => {
 	}, 15_000);
 
 	test.skipIf(!node)("a worker session without gate state exits 2 with the denial code", async () => {
-		const result = await run(workerEnv(mkdtempSync(join(tmpdir(), "wolfpack-gate-"))), bash);
+		const result = await run(workerEnv(shortTempDir()), bash);
 		expect(result.exitCode).toBe(2);
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toStartWith("PI_TASK_WORKER_ASSIGNMENT_REQUIRED");
 	}, 15_000);
 
-	test.skipIf(!node)("a worker session with live authorized state exits 0; own tools need no state", async () => {
-		const stateDir = mkdtempSync(join(tmpdir(), "wolfpack-gate-"));
-		const directory = join(stateDir, CLAUDE_PLUGIN.statusDirectory);
-		mkdirSync(directory, { recursive: true });
+	test.skipIf(!node)("a worker session whose running task server authorizes exits 0; own tools need no server", async () => {
+		const stateDir = shortTempDir();
+		const environment = readClaudeEnvironment(workerEnv(stateDir));
+		if (environment.kind !== "ready") throw new Error(environment.kind);
+		const listener = await listenWorkerGate({ path: environment.gateSocketPath, sessionId, answer: async () => ({ authorized: true, reason: null }), log: () => undefined });
+		try {
+			expect(await run(workerEnv(stateDir), bash)).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+		} finally {
+			await listener?.close();
+		}
+		expect(await run(workerEnv(stateDir), bash)).toMatchObject({ exitCode: 2, stderr: expect.stringContaining("task server socket is missing") });
+		expect(await run(workerEnv(shortTempDir()), JSON.stringify({ tool_name: `${CLAUDE_PLUGIN.toolPrefix}agent_task_inbox` }))).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+	}, 15_000);
+
+	// R1: an authorized server that exited without revocation. Its socket file remains, and the earlier file-based gate
+	// state names a live process (here this test process, standing in for an unreaped or reused pid).
+	test.skipIf(!node)("a worker session whose task server was killed without revocation exits 2", async () => {
+		const stateDir = shortTempDir();
+		const environment = readClaudeEnvironment(workerEnv(stateDir));
+		if (environment.kind !== "ready") throw new Error(environment.kind);
+		const directory = dirname(dirname(environment.gateSocketPath));
+		mkdirSync(dirname(environment.gateSocketPath), { recursive: true, mode: 0o700 });
 		const now = Date.now();
-		writeFileSync(join(directory, `${sessionId}${CLAUDE_PLUGIN.gateFileSuffix}`), JSON.stringify({ version: 1, sessionId, pid: process.pid, parentPid: process.ppid, authorized: true, reason: null, evaluatedAt: now, expiresAt: now + 60_000 }));
-		expect(await run(workerEnv(stateDir), bash)).toEqual({ stdout: "", stderr: "", exitCode: 0 });
-		expect(await run(workerEnv(mkdtempSync(join(tmpdir(), "wolfpack-gate-"))), JSON.stringify({ tool_name: `${CLAUDE_PLUGIN.toolPrefix}agent_task_inbox` }))).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+		writeFileSync(join(directory, `${sessionId}.gate.json`), JSON.stringify({ version: 1, sessionId, pid: process.pid, parentPid: process.ppid, authorized: true, reason: null, evaluatedAt: now, expiresAt: now + 60_000 }));
+		const killed = Bun.spawn([process.execPath, "-e", `require("node:net").createServer().listen(${JSON.stringify(environment.gateSocketPath)}, () => console.log("ready"))`], { stdout: "pipe" });
+		await killed.stdout.getReader().read();
+		killed.kill("SIGKILL");
+		await killed.exited;
+		const result = await run(workerEnv(stateDir), bash);
+		expect(result.exitCode).toBe(2);
+		expect(result.stderr).toStartWith("PI_TASK_WORKER_ASSIGNMENT_REQUIRED");
+		expect(result.stderr).toContain("connection refused");
 	}, 15_000);
 });
 

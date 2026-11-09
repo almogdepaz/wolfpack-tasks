@@ -1,21 +1,18 @@
 import { readFileSync } from "node:fs";
 
 import { WORKER_GATE_DENIAL_CODE } from "../task-worker-mode";
-import { decideWorkerGateHook, pidAlive } from "./worker-gate";
+import { decideWorkerGateHook } from "./worker-gate";
 
 // Entry point of the plugin's fail-closed PreToolUse command hook (dist/worker-gate.mjs). Exit 2 blocks the tool call.
 let stdinRead = false;
 let result;
 try {
-	result = decideWorkerGateHook({
+	result = await decideWorkerGateHook({
 		env: process.env,
 		readStdin: () => {
 			stdinRead = true;
 			return readFileSync(0, "utf8");
 		},
-		readFile: (path) => readFileSync(path, "utf8"),
-		pidAlive,
-		now: Date.now(),
 	});
 } catch (error) {
 	// Unreachable by design; any other exit code would also block under onFailure: "block".

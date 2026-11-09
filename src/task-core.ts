@@ -68,6 +68,8 @@ export type SubmitIntentOutcome =
 
 /** Local `wake_accepted` evidence is persisted before Pi wake emission; flush delivers it once the wake is observed. */
 export interface WakeRequest {
+	/** An earlier process reserved emission, but no durable harness wake was observed. */
+	readonly outcome?: "new" | "unconfirmed";
 	flush(signal?: AbortSignal): Promise<void>;
 	/** Withdraws the never-sent record when Pi did not accept the wake; call synchronously after the wake attempt. */
 	discard(): void;
@@ -79,6 +81,8 @@ export type TaskInboxItem =
 	| { readonly kind: "local"; readonly event: TaskEvent; readonly order: number };
 
 export interface TaskCore {
+	/** Durable controllers never clear state or bind a fresh identity after loss. */
+	readonly recoveryProfile?: "restart-safe-v1";
 	readonly endpoint: TaskEndpoint;
 	connect(signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
 	createTask(input: CreateTaskInput, signal?: AbortSignal, work?: TaskWorkScope): Promise<{ readonly taskId: string }>;
@@ -406,10 +410,13 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 					payload: { eventId: input.eventId, stage: evidence.stage, state: evidence.state },
 				}, operation);
 			});
-			// An origin canonicalizes evidence straight into its task log, which cannot be withdrawn,
-			// so it records on flush; a receiver writes its outbound record before the wake.
-			let persisted = sameEndpoint(options.endpoint, requiredTask(options.store, input.taskId).origin) ? undefined : persist();
+			const attemptOperation = `wake-attempt:${input.eventId}`;
+			const attempt = options.store.transaction(() => options.store.reserveTaskOperation({ taskId: input.taskId, operation: attemptOperation,
+				logicalId: ids(), logicalType: "task.wake_attempt", envelopeIds: [] }));
+			// A reservation is NOT wake acceptance. Only flush after durable harness evidence may create a receipt.
+			let persisted: ReturnType<typeof persist> | undefined;
 			return {
+				outcome: attempt.created ? "new" : "unconfirmed",
 				flush: async (signal?: AbortSignal): Promise<void> => {
 					const { envelopeIds } = persisted ??= persist();
 					const activeWork = work ?? workScope(signal);
@@ -418,6 +425,7 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 				discard: () => {
 					// No await separates the write from this call, so the envelope was never offered to the relay.
 					if (persisted?.created) options.store.discardUnsentOperation(input.taskId, operation);
+					if (attempt.created) options.store.discardUnsentOperation(input.taskId, attemptOperation);
 					persisted = undefined;
 				},
 			};

@@ -156,7 +156,8 @@ async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, 
 	if (hasAcknowledgedLocalOriginTerminal(core, event)) { await recordInsertion(); return true; }
 	if (!context.isIdle()) { await recordInsertion(); return false; }
 	// This synchronous local write closes the ACK/wake race; do not await relay I/O before Pi emits the wake.
-	const wakeRequest = receipts && core.recordWakeRequest(eventDetails, receipts.work);
+	const wakeRequest = core.recordWakeRequest(eventDetails, receipts?.work);
+	if (wakeRequest.outcome === "unconfirmed") throw new TaskProtocolError("TASK_PRESENTATION_UNCONFIRMED", "a prior wake attempt has no durable harness outcome; automatic execution is fenced", { retryable: false, details: eventDetails });
 	let wakeAccepted = false;
 	try {
 		pi.sendMessage({
@@ -168,10 +169,10 @@ async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, 
 		wakeAccepted = taskEntryEvidence(context.sessionManager).wakes.has(eventKey);
 	} finally {
 		// An unaccepted or throwing wake must not leave a wake_accepted record for the outbox flush.
-		if (!wakeAccepted) wakeRequest?.discard();
+		if (!wakeAccepted) wakeRequest.discard();
 	}
 	if (!wakeAccepted) { await recordInsertion(); return false; }
-	if (receipts && wakeRequest) await wakeRequest.flush(receipts.signal);
+	if (receipts) await wakeRequest.flush(receipts.signal);
 	return true;
 }
 

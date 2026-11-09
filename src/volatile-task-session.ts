@@ -7,6 +7,7 @@ import type { TaskStore } from "./task-store";
 import { fromWolfpackEnvelope, toWolfpackEnvelope, WOLFPACK_TASK_RELAY_ID } from "./wolfpack-task-relay";
 
 export const VOLATILE_PROFILE = "volatile-v1";
+export const RESTART_SAFE_PROFILE = "restart-safe-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CURSOR = /^(0|[1-9][0-9]{0,31})$/;
 
@@ -14,6 +15,7 @@ export interface VolatileTaskSessionOptions {
   /** Explicit trusted endpoint ingress URL. No default route or installed server. */
   readonly url: string;
   readonly callerSession: string;
+  readonly profile?: RelayTransportBinding["profile"];
   /** Caller owns this endpoint's RAM state and closes it after session.close(). */
   readonly store: TaskStore;
   readonly fetch?: typeof fetch;
@@ -34,12 +36,13 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
   if (!text(options.callerSession)) throw new TypeError("caller session is required");
   const timeoutMs = options.requestTimeoutMs ?? 12_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15_000) throw new TypeError("invalid relay request deadline");
-  const requestFetch = options.fetch ?? fetch, store = options.store;
+  const requestFetch = options.fetch ?? fetch, store = options.store, profile = options.profile ?? VOLATILE_PROFILE;
+  if (profile === RESTART_SAFE_PROFILE && !UUID.test(options.callerSession)) throw new TypeError("restart-safe tasks require the authoritative session UUID");
   let transport: Transport | undefined, core: TaskCore | undefined, busy = false, closed = false;
   let reset = false;
   const saved = () => store.getRelayTransportBinding();
   const validateSaved = (binding: RelayTransportBinding) => {
-    if (binding.profile !== VOLATILE_PROFILE || !UUID.test(binding.epoch) || !localEndpoint(binding.endpoint)
+    if (binding.profile !== profile || !UUID.test(binding.epoch) || !localEndpoint(binding.endpoint)
       || !text(binding.generation) || typeof binding.url !== "string" || !text(binding.callerSession) || (binding.reset !== undefined && binding.reset !== true)
       || !same(store.getEndpointBinding(), binding.endpoint)) throw failure("INVALID_RELAY_METADATA", false);
   };
@@ -66,6 +69,7 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
       let prior = saved(), priorEndpoint = store.getEndpointBinding();
       if (prior) validateSaved(prior);
       if (!replace && (reset || prior?.reset || (!prior && priorEndpoint) || (prior && (prior.url !== url.href || prior.callerSession !== options.callerSession)))) { reset = true; throw failure("RELAY_REBIND_REQUIRED", false); }
+      if (replace && profile === RESTART_SAFE_PROFILE) throw failure("RELAY_RESET", false, { recovery: "journal retained; authoritative binding requires investigation" });
       if (replace) {
         // Explicit acceptance of loss starts empty. Session history is the only
         // archive; old task identities/ACKs/outbox must never enter the new scope.
@@ -75,7 +79,7 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
       const expectedBinding = saved();
       const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
       store.transaction(() => store.setEndpointGeneration(generation));
-      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset);
+      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, profile);
       transport = selected;
       const binding = await selected.register(signal);
       if (closed) throw failure("RELAY_CLOSED", false);
@@ -124,7 +128,7 @@ class Transport {
   private active = 0;
   private readonly waiters: Array<{ reserved: boolean; grant(): void }> = [];
   constructor(private url: string, private caller: string, private generation: string, prior: RelayTransportBinding | undefined,
-    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void) { this.binding = prior; }
+    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void, private profile: RelayTransportBinding["profile"]) { this.binding = prior; }
   stop(): void { this.stopSignal.abort(); }
   assertActive(): void { if (this.stopSignal.signal.aborted) throw failure("RELAY_RESET", false, { mayHaveBeenDelivered: true }); }
   assertStoredBinding(binding: RelayTransportBinding | undefined): void {
@@ -137,12 +141,13 @@ class Transport {
     if (this.binding && this.expiresAt - Date.now() > this.timeoutMs + 10_000) return this.binding;
     if (this.renewing) return this.renewing;
     this.renewing = (async () => {
-      const reply = await this.request({ operation: "connect", profile: VOLATILE_PROFILE, callerSession: this.caller, generation: this.generation,
+      const reply = await this.request({ operation: "connect", profile: this.profile, callerSession: this.caller, generation: this.generation,
         protocolVersions: [2], leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
       const value = reply.value;
       if (!record(value) || value.kind !== "connected" || !localEndpoint(value.endpoint) || typeof value.leaseExpiresAt !== "string" || !(Date.parse(value.leaseExpiresAt) > Date.now())) throw failure("INVALID_CONNECTION", true);
+      if (this.profile === RESTART_SAFE_PROFILE && value.sessionId !== this.caller) throw failure("SOURCE_MISMATCH", false);
       if (this.binding && !same(this.binding.endpoint, value.endpoint)) this.retire();
-      this.binding = Object.freeze({ profile: VOLATILE_PROFILE, epoch: reply.epoch, endpoint: Object.freeze({ ...value.endpoint }), generation: this.generation, callerSession: this.caller, url: this.url });
+      this.binding = Object.freeze({ profile: this.profile, epoch: reply.epoch, endpoint: Object.freeze({ ...value.endpoint }), generation: this.generation, callerSession: this.caller, url: this.url });
       this.expiresAt = Math.min(Date.parse(value.leaseExpiresAt), Date.now() + 60_000);
       return this.binding;
     })();
@@ -244,6 +249,10 @@ class Transport {
         if (controller.signal.aborted) throw abortError();
         const response = await this.fetcher(this.url, { method: "POST", headers: { "content-type": "application/json" }, body: encoded, redirect: "error", signal: controller.signal });
         if (controller.signal.aborted) { void response.body?.cancel().catch(() => undefined); throw abortError(); }
+        if (this.profile === RESTART_SAFE_PROFILE && response.status === 404) {
+          void response.body?.cancel().catch(() => undefined);
+          throw failure("RELAY_PROFILE_REQUIRED", false);
+        }
         const rateLimited = response.status === 429;
         if (response.status === 401 || rateLimited) {
           // Admission failures need no relay profile. Best-effort cleanup must not mask their status.
@@ -271,14 +280,19 @@ class Transport {
       const data = result.value;
       // An explicit permanent profile refusal retires an existing lifetime even
       // when the selected server engine has no volatile epoch to return.
-      if (record(data) && (data.profile === VOLATILE_PROFILE || data.profile === "durable-v2")
+      if (record(data) && (data.profile === VOLATILE_PROFILE || data.profile === RESTART_SAFE_PROFILE || data.profile === "durable-v2")
         && data.ok === false && record(data.error) && data.error.code === "RELAY_PROFILE_REQUIRED" && data.error.retryable === false) {
         if (this.binding) this.retire();
         throw failure("RELAY_PROFILE_REQUIRED", false);
       }
-      if (!record(data) || data.profile !== VOLATILE_PROFILE) throw failure("RELAY_PROFILE_REQUIRED", false);
+      if (!record(data) || data.profile !== this.profile) throw failure("RELAY_PROFILE_REQUIRED", false);
       if (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch) this.retire();
       if (data.ok === false && record(data.error) && text(data.error.code) && typeof data.error.retryable === "boolean") {
+        if (this.profile === RESTART_SAFE_PROFILE && data.error.code === "REGISTRATION_EXPIRED") {
+          // No operation was admitted. Renew the same persisted generation on the next pass.
+          this.expiresAt = 0;
+          throw failure("RELAY_UNAVAILABLE", true);
+        }
         if (RESET_CODES.has(data.error.code)) this.retire();
         const epochlessRejection = data.epoch === undefined && ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code);
         if ((!uuid(data.epoch) && !epochlessRejection) || (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch)) throw failure("INVALID_RESPONSE", true);

@@ -310,6 +310,11 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 	};
 	const recoverRelayLoss = async (context: AgentTaskRuntimeContext, epoch: number, activeCore: TaskCore | undefined): Promise<boolean> => {
 		if (!ownedLoader || lifecycleEpoch !== epoch || inboxContext !== context) return false;
+		// A durable binding failure is not permission to discard assignments or adopt a fresh endpoint.
+		if (activeCore?.recoveryProfile === "restart-safe-v1") {
+			context.ui.setStatus("pi-tasks", context.ui.theme.fg("warning", "tasks: recovery blocked; journal retained, outcome unknown"));
+			return true;
+		}
 		if (relayLossRecovery) { await relayLossRecovery; return true; }
 		const pending = (async (): Promise<void> => {
 			const recoveryEpoch = ++lifecycleEpoch;

@@ -69,7 +69,7 @@ export interface TaskEndpoint {
 
 /** Endpoint-owned transport binding; not task lifecycle or relay replay state. */
 export interface RelayTransportBinding {
-	readonly profile: "volatile-v1";
+	readonly profile: "volatile-v1" | "restart-safe-v1";
 	readonly epoch: string;
 	readonly endpoint: TaskEndpoint;
 	readonly generation: string;

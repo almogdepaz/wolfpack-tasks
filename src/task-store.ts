@@ -1,3 +1,4 @@
+import type { TaskJournal, JournalRow } from "./task-journal";
 import { TASK_WORK_LIMITS } from "./task-work-scope";
 import { TASK_EVENT_TYPES, TERMINAL_INTENT_OPERATION, TaskProtocolError } from "./task-protocol";
 import type { RelayTransportBinding, RelayEnvelope, TaskEndpoint, TaskEvent, TaskRecord, TaskSnapshot, TerminalDeliveryState, TerminalTaskIntentType } from "./task-protocol";
@@ -97,7 +98,7 @@ const freeze = <T>(value: T): T => {
 const read = <T>(row: Cell): T => (row.value ??= freeze(JSON.parse(row.text))) as T;
 
 /** One endpoint lifetime. No SQLite, files, migrations, startup reads or replay. */
-export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
+export function createTaskStore(options: TaskStoreOptions = {}, journal?: TaskJournal): TaskStore {
   if (Object.keys(options).some(key => key !== "maxEntries" && key !== "maxBytes")) throw new TypeError("task state is memory-only; persistence options are unsupported");
   const maxEntries = options.maxEntries ?? LIMITS.entries, maxBytes = options.maxBytes ?? LIMITS.bytes;
   if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > LIMITS.entries || !Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > LIMITS.bytes) throw new TypeError("invalid task memory limit");
@@ -149,12 +150,13 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
     const frame = frames.at(-1), identity = JSON.stringify([name, key]);
     if (frame && !frame.has(identity)) frame.set(identity, { name, table: target, key, prior });
   };
-  const check = () => { if (closed) throw new TaskProtocolError("RELAY_CLOSED", "task state is closed", { retryable: false }); };
+  const check = () => { if (closed) throw new TaskProtocolError("RELAY_CLOSED", "task state is closed", { retryable: false }); journal?.assertHealthy(); };
   const table = (name: string) => { check(); let value = tables.get(name); if (!value) { value = new Map(); tables.set(name, value); } return value; };
   const get = <T>(name: string, key: string): T | undefined => { const row = table(name).get(key); return row ? read<T>(row) : undefined; };
   const rows = <T>(name: string): T[] => [...table(name).values()].sort((a, b) => a.order - b.order).map(row => read<T>(row));
   const taskEvents = (taskId: string): TaskEvent[] => { const events = table("events"); return [...eventsByTask.get(taskId) ?? []].map(id => read<TaskEvent>(events.get(id)!)); };
   const put = (name: string, key: string, value: unknown, onlyNew = false): boolean => {
+    if (journal && !frames.length) return store.transaction(() => put(name, key, value, onlyNew));
     const target = table(name), prior = target.get(key);
     if (onlyNew && prior) return false;
     const text = JSON.stringify(value), size = Buffer.byteLength(text) + Buffer.byteLength(key) + 64;
@@ -166,7 +168,8 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
     committed(name, key);
     return true;
   };
-  const remove = (name: string, key: string) => {
+  const remove = (name: string, key: string): void => {
+    if (journal && !frames.length) return store.transaction(() => remove(name, key));
     const target = table(name), prior = target.get(key); if (!prior) return;
     remember(name, key, target, prior);
     target.delete(key); reindex(name, key, prior, undefined); bytes -= prior.bytes; entries--;
@@ -209,6 +212,15 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
         if (parent) {
           for (const [key, item] of frame) if (!parent.has(key)) parent.set(key, item);
         } else {
+          if (journal && frame.size) {
+            const changed: JournalRow[] = [], removed: { table: string; key: string }[] = [];
+            for (const item of frame.values()) {
+              const row = item.table.get(item.key);
+              if (row) changed.push({ table: item.name, key: item.key, text: row.text, order: row.order });
+              else removed.push({ table: item.name, key: item.key });
+            }
+            journal.commit(changed, removed);
+          }
           for (const item of frame.values()) if (item.table === tables.get("outbox")) syncPendingOutbox(item.key);
           topLevelChange = frame.size > 0;
         }
@@ -335,8 +347,29 @@ export function createTaskStore(options: TaskStoreOptions = {}): TaskStore {
     setEndpointBinding(value) { put("state", "endpoint", value); },
     getRelayTransportBinding() { return state<RelayTransportBinding>("transport"); },
     setRelayTransportBinding(value) { put("state", "transport", value); },
-    clear() { check(); if (frames.length) throw new Error("cannot clear task state during a transaction"); tables.clear(); eventsByTask.clear(); activeTasks.clear(); pendingOutbox.clear(); pendingByTarget.clear(); pendingTarget.clear(); bytes = entries = sequence = 0; },
-    close() { if (closed) return; store.clear(); closed = true; },
+    clear() { check(); if (journal) throw new TaskProtocolError("TASK_STORAGE_INVALID", "durable task state cannot be discarded by rebind", { retryable: false }); if (frames.length) throw new Error("cannot clear task state during a transaction"); tables.clear(); eventsByTask.clear(); activeTasks.clear(); pendingOutbox.clear(); pendingByTarget.clear(); pendingTarget.clear(); bytes = entries = sequence = 0; },
+    close() { if (closed) return; if (!journal) store.clear(); else journal.close(); closed = true; tables.clear(); listeners.clear(); },
   };
+  if (journal) {
+    try {
+      const buckets = new Set(["tasks", "events", "outbox", "quarantine", "inbox", "presentation", "checkpoints", "intents", "insertions", "operations", "state"]);
+      const orders = new Set<number>();
+      for (const row of journal.load()) {
+        const value: unknown = JSON.parse(row.text);
+        const size = Buffer.byteLength(row.text) + Buffer.byteLength(row.key) + 64;
+        if (!buckets.has(row.table) || orders.has(row.order) || value === null || ++entries > maxEntries || (bytes += size) > maxBytes) throw new Error("invalid task journal cells");
+        orders.add(row.order);
+        const cell: Cell = { text: row.text, bytes: size, order: row.order };
+        table(row.table).set(row.key, cell); reindex(row.table, row.key, undefined, cell);
+        sequence = Math.max(sequence, row.order + 1);
+      }
+      for (const id of table("outbox").keys()) syncPendingOutbox(id);
+      // Exercise linked task/event/terminal-operation projections before any network I/O.
+      for (const task of store.listTasks()) {
+        if (task.taskId === undefined || task.protocolVersion !== "pi-tasks/v2" || !task.origin?.id || !task.target?.id || !["active", "completed", "failed", "cancelled", "timed_out"].includes(task.status)
+          || task.events.some(event => event.taskId !== task.taskId || !event.eventId || !/^[1-9][0-9]*$/.test(event.sequence))) throw new Error("invalid task journal relationships");
+      }
+    } catch (error) { journal.close(); throw new TaskProtocolError("TASK_STORAGE_INVALID", "task journal validation failed", { retryable: false }); }
+  }
   return store;
 }

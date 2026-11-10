@@ -6,6 +6,7 @@ import { CLAUDE_PLUGIN } from "./constants";
 import { readClaudeEnvironment } from "./environment";
 import { isJsonRpcError, isRecord, JSON_RPC_ERROR, parseJsonRpc } from "./json-rpc";
 import type { JsonRpcError, JsonRpcId, JsonRpcMessage, JsonRpcRequest } from "./json-rpc";
+import { NOTIFY_PARENT_TOOL } from "./notify-parent";
 import type { CommandRunner, WakeTimers, WakeTiming } from "./wake";
 
 export const SERVER_VERSION = "0.2.0";
@@ -15,6 +16,7 @@ export const SERVER_INSTRUCTIONS = [
 	`A <channel source="${CLAUDE_PLUGIN.serverName}"> message is a wolfpack task notification. It carries only a pointer, never the task content.`,
 	"When one arrives, call agent_task_inbox; the inbox result contains the delivered task messages and any assignment.",
 	"The same pointer may also be typed into the prompt as a fallback when the channel does not wake the session; treat it the same way.",
+	`In a session spawned by another wolfpack session, ${NOTIFY_PARENT_TOOL} reports to the parent; it replaces \`wolfpack agent notify-parent\` for claude sessions.`,
 ].join("\n");
 
 export interface ClaudeTaskServerOptions {
@@ -27,6 +29,8 @@ export interface ClaudeTaskServerOptions {
 	readonly timers?: WakeTimers;
 	readonly timing?: WakeTiming;
 	readonly log?: (message: string) => void;
+	/** Test seam: the local server request of agent_notify_parent. */
+	readonly fetch?: typeof fetch;
 }
 
 export interface ClaudeTaskServer {
@@ -57,6 +61,8 @@ export function createClaudeTaskServer(options: ClaudeTaskServerOptions): Claude
 	const send = options.send;
 	const adapter: ClaudeTaskAdapter = createClaudeTaskAdapter({
 		environment,
+		env: options.env,
+		...(options.fetch && { fetch: options.fetch }),
 		...(options.core && { core: options.core }),
 		...(options.createCore && { createCore: options.createCore }),
 		sendChannel: (meta) => send({ jsonrpc: "2.0", method: CLAUDE_PLUGIN.channelMethod, params: { content: CLAUDE_PLUGIN.pointer, meta } }),

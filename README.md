@@ -195,6 +195,7 @@ your application owns polling, retries, timeout evaluation, delivery acknowledgm
 ## important limits
 
 - **active endpoint state lives in RAM.** plugin/agent-process restart loses that endpoint's tasks. a SQLite-backed Wolfpack relay preserves accepted mail and transport identity across server/relay restart while the same live plugins retain task state/outbox. older or explicitly memory-only servers can still lose even accepted mail. session history does not restore tasks or authorize replay. this is at-least-once transport, not exactly-once model execution.
+- **fresh is not recovered.** after fully transport-ACKed tasks, a SQLite relay can retain terminal receipts while a fresh plugin starts empty. mailbox or active/uncertain-in-flight forwarding obligations still block replacement; capacity limits can also reject it. no predecessor tasks, cursors or ACK authority are adopted.
 - **accepted is not executed.** relay acceptance, receiver receipt, pi follow-up insertion, model execution, and task completion are separate stages.
 - **the parent owns task status.** a worker submits a result; the origin processes it before its task becomes terminal. status reads are local snapshots.
 - **use a trusted network.** the wolfpack integration assumes trusted tailnet machines. do not expose owner APIs to the public internet or an untrusted proxy.

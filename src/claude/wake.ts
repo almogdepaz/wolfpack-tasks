@@ -50,7 +50,7 @@ export interface WakeStatusPatch {
 	readonly lastInboxAt?: number;
 	readonly lastNudgeAt?: number;
 	readonly fallbackAt?: number;
-	readonly lastNudgeError?: string;
+	readonly lastNudgeError?: string | null;
 	/** Failed status checks for the current pointer. */
 	readonly statusFailures?: number;
 	/** Set when a pointer's fallback was given up after its status retries; cleared by the next inbox call. */
@@ -159,7 +159,7 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 			if (fence !== undefined) { report({ lastNudgeAt: at, lastNudgeError: `submit skipped: ${fence} during paste` }); return; }
 			if (mode === "channel") { mode = "fallback"; report({ wake: mode, fallbackAt: at }); }
 			const submit = await command(["wolfpack", "session", "send", options.sessionId, "\r", "--no-enter", "--json"]);
-			report(submit.exitCode === 0 ? { lastNudgeAt: at } : { lastNudgeAt: at, lastNudgeError: `session submit exited ${submit.exitCode}` });
+			report(submit.exitCode === 0 ? { lastNudgeAt: at, lastNudgeError: null } : { lastNudgeAt: at, lastNudgeError: `session submit exited ${submit.exitCode}` });
 		} catch (error) {
 			report({ lastNudgeError: error instanceof Error ? error.message : String(error) });
 		} finally {
@@ -185,7 +185,7 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 			outstanding = undefined;
 			cancelTimer?.();
 			cancelTimer = undefined;
-			if (!closed) options.onChange({ wake: mode, lastInboxAt: options.timers.now(), wakeStalledAt: null });
+			if (!closed) options.onChange({ wake: mode, lastInboxAt: options.timers.now(), lastNudgeError: null, wakeStalledAt: null });
 		},
 		activity(state) {
 			activity = state;

@@ -231,6 +231,29 @@ test.each([
 	f.wake.close();
 });
 
+test("a successful submit clears the previous nudge error in reported status", async () => {
+	const f = fixture(READY, flakyStatus(1, unavailable));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.patches.at(-1)?.lastNudgeError).toBeString();
+	await f.vt.advance(DEFAULT_WAKE_TIMING.statusRetryMs);
+	expect(f.commands).toEqual([STATUS, STATUS, PASTE, SUBMIT]);
+	expect(f.patches.at(-1)).toMatchObject({ lastNudgeAt: f.vt.now(), lastNudgeError: null });
+	f.wake.close();
+});
+
+test("an inbox call clears the previous nudge error in reported status", async () => {
+	const f = fixture(READY, flakyStatus(1, unavailable));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.patches.at(-1)?.lastNudgeError).toBeString();
+	f.wake.inboxCalled();
+	expect(f.patches.at(-1)).toMatchObject({ lastInboxAt: f.vt.now(), lastNudgeError: null });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.statusRetryMs);
+	expect(f.commands).toEqual([STATUS]);
+	f.wake.close();
+});
+
 test("a retry waits while the session is busy and resumes after the idle settle", async () => {
 	const f = fixture(READY, flakyStatus(1, unavailable));
 	f.wake.requestPointer({ task_id: "t1" });

@@ -9,7 +9,7 @@ import type { JsonRpcError, JsonRpcId, JsonRpcMessage, JsonRpcRequest } from "./
 import { NOTIFY_PARENT_TOOL } from "./notify-parent";
 import type { CommandRunner, WakeTimers, WakeTiming } from "./wake";
 
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.3.0";
 
 export const SERVER_INSTRUCTIONS = [
 	"Wolfpack task delegation tools (agent_task_*), the same tools and semantics as the pi extension.",

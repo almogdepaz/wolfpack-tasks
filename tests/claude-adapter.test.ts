@@ -97,6 +97,37 @@ test("an inbox result returns each assignment once", async () => {
 	expect(first.structuredContent).toMatchObject({ tasks: [{ status: "active" }] });
 });
 
+test("the inbox stays compact with long task histories and preserves delivered and active assignment text", async () => {
+	const { origin, worker, harness } = await fixture();
+	const historical: string[] = [];
+	for (let task = 0; task < 12; task++) {
+		const taskId = await assign(origin, worker, harness, `historical assignment ${task}`);
+		await harness.callTool("agent_task_inbox");
+		for (let event = 0; event < 8; event++) {
+			await worker.submitIntent({ taskId, type: "task.information", payload: { message: "history detail ".repeat(80) } });
+		}
+		await origin.receive();
+		await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "historical task complete" });
+		await origin.receive();
+		await origin.acknowledgeParent(taskId);
+		await harness.callTool("agent_task_inbox");
+		historical.push(taskId);
+	}
+	const active = await assign(origin, worker, harness, "active assignment must remain visible");
+	const inbox = await harness.callTool("agent_task_inbox");
+	expect(inbox.isError).toBeUndefined();
+	expect(inbox.structuredContent?.delivered).toEqual(expect.arrayContaining([expect.stringContaining("active assignment must remain visible")]));
+	expect(Buffer.byteLength(JSON.stringify(inbox))).toBeLessThan(16_384);
+	expect(inbox.structuredContent?.tasks).toEqual([
+		...historical.map((taskId) => ({ taskId, status: "completed" })),
+		{ taskId: active, status: "active" },
+	]);
+	const again = await harness.callTool("agent_task_inbox");
+	expect(again.content.map((part) => part.text).join("\n")).toContain("active assignment must remain visible");
+	const status = await harness.callTool("agent_task_status", { taskId: historical[0] });
+	expect(JSON.stringify(status.structuredContent)).toContain("history detail ");
+});
+
 test("the status file records the wake mode and protocol version", async () => {
 	const { env } = await fixture();
 	const path = join(env.WOLFPACK_DIR!, "wolfpack-tasks", "claude", `${SESSION_ID}.json`);

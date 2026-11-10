@@ -209,7 +209,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 				if (pointed && pendingMessages.length === 0 && !signal.aborted) result = await tool.execute("inbox", params as never, signal, undefined, context);
 				const delivered = [...deferredMessages.splice(0), ...pendingMessages.splice(0)];
 				const noted = notes.splice(0);
-				return mcpResult(result, [...delivered, ...noted]);
+				return mcpResult(result, [...delivered, ...noted], true);
 			} finally {
 				presenting = false;
 			}
@@ -333,12 +333,16 @@ function listing(runtime: AgentTaskRuntime, active: boolean, notify: boolean): M
 	return tools;
 }
 
-function mcpResult(result: AgentTaskToolResult, delivered: readonly string[]): McpToolResult {
+function mcpResult(result: AgentTaskToolResult, delivered: readonly string[], inbox = false): McpToolResult {
 	const details = isRecord(result.details) ? result.details : { value: result.details };
+	// Inbox summaries must not duplicate full event histories; agent_task_status still returns the full record.
+	const structured = inbox && Array.isArray(details.tasks)
+		? { ...details, tasks: details.tasks.map((task) => isRecord(task) ? { taskId: task.taskId, status: task.status } : task) }
+		: details;
 	const isError = isRecord(details.error);
 	return {
 		content: [...delivered, ...result.content.map((part) => part.text)].map((text) => ({ type: "text" as const, text })),
-		structuredContent: delivered.length > 0 ? { ...details, delivered } : details,
+		structuredContent: delivered.length > 0 ? { ...structured, delivered } : structured,
 		...(isError && { isError: true as const }),
 	};
 }

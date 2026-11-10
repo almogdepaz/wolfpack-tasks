@@ -175,7 +175,7 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 			const at = options.timers.now();
 			if (outstanding && !(outstanding.nudgedAt !== undefined && at - outstanding.nudgedAt >= NUDGED_POINTER_EXPIRY_MS)) return;
 			outstanding = { at, nudged: false, nudging: false, statusFailures: 0 };
-			if (mode === "channel") options.sendChannel(meta);
+			options.sendChannel(meta);
 			options.onChange({ lastPointerAt: at, statusFailures: 0 });
 			schedule(grace());
 		},

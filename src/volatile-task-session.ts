@@ -4,7 +4,7 @@ import { RESET_CODES, RETRY_CODES, taskErrorMessage } from "./task-errors";
 import { TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type { RelayTransportBinding, TaskEndpoint, TaskRelay } from "./task-protocol";
 import type { TaskStore } from "./task-store";
-import { CHILD_EVENT_RELAY_PROTOCOL, createChildEventDeduper, isChildEventPayload, parseChildEvent } from "./child-events";
+import { CHILD_EVENT_ACK_RETRY_LIMIT, CHILD_EVENT_RELAY_PROTOCOL, createChildEventDeduper, isChildEventPayload, parseChildEvent } from "./child-events";
 import type { ChildEventIntake } from "./child-events";
 import { fromWolfpackEnvelope, toWolfpackEnvelope, WIRE_VERSION, WOLFPACK_TASK_RELAY_ID } from "./wolfpack-task-relay";
 
@@ -141,6 +141,8 @@ class Transport {
   private renewing: Promise<RelayTransportBinding> | undefined;
   private active = 0;
   private readonly waiters: Array<{ reserved: boolean; grant(): void }> = [];
+  /** Consumed child events whose ACK is not confirmed, oldest first. A transport serves one endpoint lifetime. */
+  private readonly unconfirmedChildAcks = new Set<string>();
   constructor(private url: string, private caller: string, private generation: string, prior: RelayTransportBinding | undefined,
     private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void,
     private protocolVersions: readonly number[], private onChildEvent: ChildEventHandler) { this.binding = prior; }
@@ -227,7 +229,11 @@ class Transport {
           const consumed = await this.acknowledgeChildEvents(childEvents, signal);
           if (deliveries.length) return { deliveries, nextCursor: deliveries.at(-1)!.cursor, hasMore: value.hasMore };
           // An empty page must not report more. Read again only while consumption is confirmed, so it cannot loop.
-          if (!value.hasMore || !consumed || round >= CHILD_EVENT_PAGE_ROUNDS) return { deliveries, nextCursor: input.cursor, hasMore: false };
+          if (!value.hasMore || !consumed || round >= CHILD_EVENT_PAGE_ROUNDS) {
+            // Only a receive that returns no task mail retries older unconfirmed ACKs, so a retry never delays a task.
+            await this.retryChildAcks(new Set(childEvents), signal);
+            return { deliveries, nextCursor: input.cursor, hasMore: false };
+          }
         }
       },
       acknowledgeDelivery: async (input, signal) => {
@@ -239,22 +245,39 @@ class Transport {
     };
   }
   /**
-   * Acknowledges consumed child events. An unconfirmed ACK does not fail the task page: the item is redelivered, the
-   * session's deduplication suppresses a second presentation, and the ACK is retried. A reset or abort still fails.
+   * Acknowledges consumed child events. An unconfirmed ACK does not fail the task page. Its envelope id is held in
+   * `unconfirmedChildAcks`, independent of the task cursor, which may already be past the child event: a later receive
+   * retries it (`retryChildAcks`). If the relay delivers the child event again first, it is acknowledged again here,
+   * and the session's deduplication suppresses a second presentation. A reset or abort still fails.
    */
   private async acknowledgeChildEvents(envelopeIds: readonly string[], signal?: AbortSignal): Promise<boolean> {
     let confirmed = true;
-    for (const envelopeId of envelopeIds) {
-      try {
-        const value = await this.operation("acknowledge", { envelopeId }, signal);
-        if (value.kind !== "acknowledged") confirmed = false;
-      } catch (error) {
-        this.assertActive();
-        if (signal?.aborted) throw error;
-        confirmed = false;
-      }
-    }
+    for (const envelopeId of envelopeIds) if (!await this.acknowledgeChildEvent(envelopeId, signal)) confirmed = false;
     return confirmed;
+  }
+  /**
+   * Retries held child-event ACKs, oldest first, except the ones this receive already tried. It stops at the first
+   * unconfirmed ACK, so an unhealthy relay costs one request per receive; that envelope id moves to the end of the set.
+   */
+  private async retryChildAcks(tried: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+    for (const envelopeId of [...this.unconfirmedChildAcks]) {
+      if (!tried.has(envelopeId) && !await this.acknowledgeChildEvent(envelopeId, signal)) return;
+    }
+  }
+  /** One child-event ACK. Only `acknowledged` (also as a duplicate) confirms it and releases the held envelope id. */
+  private async acknowledgeChildEvent(envelopeId: string, signal?: AbortSignal): Promise<boolean> {
+    let confirmed = false;
+    try {
+      confirmed = (await this.operation("acknowledge", { envelopeId }, signal)).kind === "acknowledged";
+    } catch (error) {
+      this.assertActive();
+      if (signal?.aborted) throw error;
+    }
+    this.unconfirmedChildAcks.delete(envelopeId);
+    if (confirmed) return true;
+    this.unconfirmedChildAcks.add(envelopeId);
+    if (this.unconfirmedChildAcks.size > CHILD_EVENT_ACK_RETRY_LIMIT) this.unconfirmedChildAcks.delete(this.unconfirmedChildAcks.values().next().value as string);
+    return false;
   }
   // FIFO in-flight slots: 8 for ordinary requests, 2 more held for acknowledge/connect.
   // A waiter has sent nothing, so its abort is a plain retryable ABORTED; RELAY_CAPACITY

@@ -30,6 +30,9 @@ const LIMITS = {
 	LAST_LINE_CODE_POINTS: 200,
 } as const;
 
+/** Child-event ACKs held for retry within one endpoint lifetime; the oldest is dropped beyond this (the dedupe window). */
+export const CHILD_EVENT_ACK_RETRY_LIMIT = LIMITS.SEEN;
+
 /** The validated fields this adapter uses. Unknown payload fields are ignored, as the contract requires. */
 export interface ChildEvent {
 	readonly eventId: string;
@@ -83,7 +86,7 @@ export function parseChildEvent(payload: unknown): ChildEvent | string {
 
 /**
  * Deduplicates child-event envelopes within one endpoint lifetime. `admit` returns false for an envelope id already
- * handed to the consumer, so a redelivery after an unconfirmed ACK is acknowledged again but not presented again.
+ * handed to the consumer, so a child event that is read again after an unconfirmed ACK is not presented again.
  */
 export function createChildEventDeduper(limit: number = LIMITS.SEEN): { admit(envelopeId: string): boolean; clear(): void } {
 	const seen = new Set<string>();

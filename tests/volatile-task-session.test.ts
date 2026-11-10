@@ -300,13 +300,13 @@ function childEvent(cursor: string, payload: Record<string, unknown> = {}) {
   } } };
 }
 /** Server mailbox semantics: items after the cursor, an ACK removes the item for good. */
-function mailbox(items: Array<{ cursor: string; envelope: { envelopeId: string } }>, pageSize = 50, failAcks = 0) {
+function mailbox(items: Array<{ cursor: string; envelope: { envelopeId: string } }>, pageSize = 50, failAcks = 0, failOnly?: string) {
   const acks: string[] = [];
   const handler = (body: any): Response => {
     if (body.operation === "connect") return connected();
     if (body.operation === "acknowledge") {
       acks.push(body.envelopeId);
-      if (failAcks > 0) { failAcks--; return Response.json({ ok: false, profile: VOLATILE_PROFILE, epoch, error: { code: "RELAY_UNAVAILABLE", retryable: true } }); }
+      if (failAcks > 0 && (failOnly === undefined || failOnly === body.envelopeId)) { failAcks--; return Response.json({ ok: false, profile: VOLATILE_PROFILE, epoch, error: { code: "RELAY_UNAVAILABLE", retryable: true } }); }
       const index = items.findIndex(item => item.envelope.envelopeId === body.envelopeId);
       if (index >= 0) items.splice(index, 1);
       return reply({ kind: "acknowledged", duplicate: index < 0 });
@@ -394,3 +394,37 @@ test("an unconfirmed child-event ACK retries on redelivery without presenting th
     expect(box.acks).toHaveLength(2);
   } finally { f.close(); }
 });
+
+// Child before the task, and child between two tasks: the task cursor passes the child either way.
+for (const [name, layout] of [["child before the task", () => [childEvent("1"), assignment("2")]], ["child between two tasks", () => [assignment("1"), childEvent("2"), assignment("3")]]] as const) {
+  test(`an unconfirmed child-event ACK on a page with task mail is retried on a later receive (${name})`, async () => {
+    const items: Array<{ cursor: string; envelope: { envelopeId: string } }> = layout();
+    const childId = items.find(item => item.envelope.envelopeId.startsWith("wolfpack.child_event:"))!.envelope.envelopeId;
+    const taskCursors = items.filter(item => !item.envelope.envelopeId.startsWith("wolfpack.child_event:")).map(item => item.cursor);
+    // The first two child ACKs fail: one on the page, one on the first retry.
+    const box = mailbox(items, 50, 2, childId);
+    const seen: ChildEventIntake[] = [];
+    const f = fixture(box.handler, 1000, { onChildEvent: intake => seen.push(intake) });
+    const childAcks = () => box.acks.filter(id => id === childId).length;
+    try {
+      const core = await f.session.connect();
+      expect(relayCursors(await core.receive())).toEqual(taskCursors);
+      for (const cursor of taskCursors) await core.acknowledgeRelayDelivery(cursor);
+      expect(childAcks()).toBe(1);
+      // A failed retry does not fail the receive.
+      expect(await core.receive()).toEqual([]);
+      expect(childAcks()).toBe(2);
+      // New task mail is delivered while the child ACK is still unconfirmed.
+      items.push(assignment("4"));
+      expect(relayCursors(await core.receive())).toEqual(["4"]);
+      await core.acknowledgeRelayDelivery("4");
+      expect(await core.receive()).toEqual([]);
+      expect(items.map(item => item.envelope.envelopeId)).not.toContain(childId);
+      const confirmed = childAcks();
+      expect(await core.receive()).toEqual([]);
+      expect(childAcks()).toBe(confirmed);
+      expect(seen).toHaveLength(1);
+      expect(f.store.getReceiveCursor()).toBe("4");
+    } finally { f.close(); }
+  });
+}

@@ -103,6 +103,28 @@ test("fallback mail emits a channel pointer even when its submit is skipped", as
 	f.wake.close();
 });
 
+test("an unnudged pointer answered in fallback restores channel mode and its full grace", async () => {
+	const f = fixture();
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("fallback");
+	// An unsolicited inbox call is not evidence that a new channel pointer worked.
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("fallback");
+	f.wake.requestPointer({ task_id: "t2" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.fallbackGraceMs - 1);
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("channel");
+	expect(f.patches.at(-1)).toMatchObject({ wake: "channel", lastInboxAt: f.vt.now() });
+	f.wake.requestPointer({ task_id: "t3" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs - 1);
+	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT]);
+	await f.vt.advance(1);
+	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT, STATUS, PASTE, SUBMIT]);
+	f.wake.close();
+});
+
 test("a working session is never nudged; the nudge waits for the settled idle hook", async () => {
 	const f = fixture();
 	f.wake.activity("busy");

@@ -180,10 +180,12 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 			schedule(grace());
 		},
 		inboxCalled() {
+			// Only an answer before terminal sends is evidence that the channel can wake the model again.
+			if (!closed && outstanding && !outstanding.nudged) mode = "channel";
 			outstanding = undefined;
 			cancelTimer?.();
 			cancelTimer = undefined;
-			if (!closed) options.onChange({ lastInboxAt: options.timers.now(), wakeStalledAt: null });
+			if (!closed) options.onChange({ wake: mode, lastInboxAt: options.timers.now(), wakeStalledAt: null });
 		},
 		activity(state) {
 			activity = state;

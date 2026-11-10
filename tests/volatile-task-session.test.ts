@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createTaskStore } from "../src/task-store";
-import { createVolatileTaskSession, VOLATILE_PROFILE } from "../src/volatile-task-session";
+import { createVolatileTaskSession, VOLATILE_PROFILE, type VolatileTaskSessionOptions } from "../src/volatile-task-session";
+import type { ChildEventIntake } from "../src/child-events";
 import { TASK_PROTOCOL_VERSION } from "../src/task-protocol";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,11 +13,11 @@ const endpoint = { relay: "wolfpack-pi-tasks-v2", id: "00000000-0000-4000-8000-0
 const nextEndpoint = { ...endpoint, id: "00000000-0000-4000-8000-000000000004" };
 const reply = (value: unknown, selectedEpoch = epoch) => Response.json({ ok: true, profile: VOLATILE_PROFILE, epoch: selectedEpoch, value });
 const connected = (ep = endpoint, selectedEpoch = epoch) => reply({ kind: "connected", endpoint: ep, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }, selectedEpoch);
-function fixture(handler: (body: any) => Response | Promise<Response>, timeout = 1000) {
+function fixture(handler: (body: any) => Response | Promise<Response>, timeout = 1000, extra: Partial<VolatileTaskSessionOptions> = {}) {
   const store = createTaskStore();
   const requests: any[] = [];
   const fetcher = Object.assign(async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => { const body = JSON.parse(String(init?.body)); requests.push(body); return handler(body); }, { preconnect: fetch.preconnect }) as typeof fetch;
-  const session = createVolatileTaskSession({ url: "http://127.0.0.1:1/staged", callerSession: "fixture", store, fetch: fetcher, requestTimeoutMs: timeout });
+  const session = createVolatileTaskSession({ url: "http://127.0.0.1:1/staged", callerSession: "fixture", store, fetch: fetcher, requestTimeoutMs: timeout, ...extra });
   return { store, session, requests, fetcher, close: () => { session.close(); store.close(); } };
 }
 function assignment(cursor: string) {
@@ -287,5 +288,109 @@ test("transport failures name the relay operation for the status line", async ()
     await expect(core.createTask({ target: endpoint, task: "busy", timeoutMs: 60_000 })).rejects.toMatchObject({ code: "RELAY_CAPACITY", retryable: true, details: { operation: "send", retryAfterMs: 10 } });
     // A malformed reply surfaces as the catch-all transport failure, still naming its operation.
     await expect(core.receive()).rejects.toMatchObject({ details: { operation: "receive" } });
+  } finally { f.close(); }
+});
+
+const hostSource = { ...endpoint, id: "00000000-0000-4000-8000-000000000006" };
+function childEvent(cursor: string, payload: Record<string, unknown> = {}) {
+  const eventId = `child-1:boot-1:${cursor}`;
+  return { cursor, envelope: { envelopeId: `wolfpack.child_event:${eventId}`, protocolVersion: 2, source: hostSource, target: endpoint, createdAt: new Date().toISOString(), payload: {
+    kind: "wolfpack.child_event/v1", eventId, bootId: "boot-1", seq: Number(cursor), childSessionId: "child-1", childName: "worker", parentSessionId: "parent-1",
+    event: "done", state: "done", observedAt: new Date().toISOString(), futureField: { ignored: true }, ...payload,
+  } } };
+}
+/** Server mailbox semantics: items after the cursor, an ACK removes the item for good. */
+function mailbox(items: Array<{ cursor: string; envelope: { envelopeId: string } }>, pageSize = 50, failAcks = 0) {
+  const acks: string[] = [];
+  const handler = (body: any): Response => {
+    if (body.operation === "connect") return connected();
+    if (body.operation === "acknowledge") {
+      acks.push(body.envelopeId);
+      if (failAcks > 0) { failAcks--; return Response.json({ ok: false, profile: VOLATILE_PROFILE, epoch, error: { code: "RELAY_UNAVAILABLE", retryable: true } }); }
+      const index = items.findIndex(item => item.envelope.envelopeId === body.envelopeId);
+      if (index >= 0) items.splice(index, 1);
+      return reply({ kind: "acknowledged", duplicate: index < 0 });
+    }
+    const after = items.filter(item => BigInt(item.cursor) > BigInt(body.cursor));
+    const page = after.slice(0, Math.min(pageSize, body.limit));
+    return reply({ kind: "page", deliveries: page, nextCursor: page.at(-1)?.cursor ?? body.cursor, hasMore: after.length > page.length });
+  };
+  return { handler, acks };
+}
+const relayCursors = (items: readonly { kind: string; delivery?: { cursor: string } }[]) => items.map(item => item.kind === "relay" ? item.delivery!.cursor : undefined);
+
+test("advertises the child-event capability only to a consumer", async () => {
+  const consumer = fixture(body => connected(), 1000, { onChildEvent: () => undefined });
+  const plain = fixture(body => connected());
+  try {
+    await consumer.session.connect(); await plain.session.connect();
+    expect(consumer.requests[0]).toMatchObject({ operation: "connect", protocolVersions: [2, 1001] });
+    expect(plain.requests[0]).toMatchObject({ operation: "connect", protocolVersions: [2] });
+  } finally { consumer.close(); plain.close(); }
+});
+
+test("a child event beside task mail never enters task core and is consumed once", async () => {
+  for (const order of [["1", "2", "3"], ["3", "1", "2"]]) {
+    // Child event first, between, and last on the page: the task page contract must still hold.
+    const items = order.map((cursor, index) => index === 1 ? assignment(cursor) : childEvent(cursor)).sort((a, b) => Number(a.cursor) - Number(b.cursor));
+    const childIds = items.filter(item => item.envelope.envelopeId.startsWith("wolfpack.child_event:")).map(item => item.envelope.envelopeId);
+    const box = mailbox(items);
+    const seen: ChildEventIntake[] = [];
+    const f = fixture(box.handler, 1000, { onChildEvent: intake => seen.push(intake) });
+    try {
+      const core = await f.session.connect();
+      const page = await core.receive();
+      expect(relayCursors(page)).toEqual([order[1]]);
+      expect(seen.map(intake => intake.kind)).toEqual(["event", "event"]);
+      const first = seen[0]!;
+      if (first.kind !== "event") throw new Error("expected an event");
+      expect(first.event).toMatchObject({ childName: "worker", event: "done", state: "done", childSessionId: "child-1" });
+      expect(first.event).not.toHaveProperty("futureField");
+      expect(box.acks.sort()).toEqual(childIds.sort());
+      expect(f.store.listTasks()).toHaveLength(1);
+    } finally { f.close(); }
+  }
+});
+
+test("a page of only child events with more pending does not break task intake", async () => {
+  const items = Array.from({ length: 5 }, (_, index) => childEvent(String(index + 1)));
+  items.push(assignment("6") as never);
+  const box = mailbox(items, 2);
+  const seen: ChildEventIntake[] = [];
+  const f = fixture(box.handler, 1000, { onChildEvent: intake => seen.push(intake) });
+  try {
+    const core = await f.session.connect();
+    const page = [...await core.receive(), ...await core.receive()];
+    expect(relayCursors(page)).toContain("6");
+    expect(seen).toHaveLength(5);
+  } finally { f.close(); }
+});
+
+test("a malformed child event is dropped with a diagnostic and the rest of the page continues", async () => {
+  const items = [childEvent("1", { event: "exploded", childName: 7 }), assignment("2"), childEvent("3")];
+  const childIds = [items[0]!.envelope.envelopeId, items[2]!.envelope.envelopeId];
+  const box = mailbox(items);
+  const seen: ChildEventIntake[] = [];
+  const f = fixture(box.handler, 1000, { onChildEvent: intake => seen.push(intake) });
+  try {
+    const core = await f.session.connect();
+    expect(relayCursors(await core.receive())).toEqual(["2"]);
+    expect(seen.map(intake => intake.kind)).toEqual(["malformed", "event"]);
+    expect(box.acks).toEqual(childIds);
+  } finally { f.close(); }
+});
+
+test("an unconfirmed child-event ACK retries on redelivery without presenting the event twice", async () => {
+  const box = mailbox([childEvent("1")], 50, 1);
+  const seen: ChildEventIntake[] = [];
+  const f = fixture(box.handler, 1000, { onChildEvent: intake => seen.push(intake) });
+  try {
+    const core = await f.session.connect();
+    expect(await core.receive()).toEqual([]);
+    expect(await core.receive()).toEqual([]);
+    expect(seen).toHaveLength(1);
+    expect(box.acks).toHaveLength(2);
+    expect(await core.receive()).toEqual([]);
+    expect(box.acks).toHaveLength(2);
   } finally { f.close(); }
 });

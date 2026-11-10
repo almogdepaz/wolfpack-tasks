@@ -1,3 +1,5 @@
+import { createChildEventQueue } from "./child-events";
+import type { ChildEventQueue } from "./child-events";
 import type { TaskCore, WakeRequest } from "./task-core";
 import { TaskProtocolError } from "./task-protocol";
 import { createTaskStore } from "./task-store";
@@ -7,6 +9,8 @@ import { wolfpackLocalHeaders } from "./wolfpack-local-auth";
 export interface OwnedTaskCore extends TaskCore {
   /** Fence new work, abort requests, settle active calls, then discard RAM state. */
   close(): Promise<void>;
+  /** Child events received in this endpoint lifetime and not yet presented; a close or rebind discards them. */
+  readonly childEvents: ChildEventQueue;
 }
 export interface ConfiguredTaskCoreOptions {
   readonly sessionName?: string;
@@ -27,15 +31,16 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
   if (base.username || base.password || base.search || base.hash || base.pathname !== "/") throw new TypeError("relay base URL must be an origin");
   const url = new URL("/api/task-relay/volatile-v1", base).href;
   const store = createTaskStore();
+  const childEvents = createChildEventQueue();
   let session: ReturnType<typeof createVolatileTaskSession> | undefined;
   try {
     const requestFetch = options.fetch ?? fetch;
     const authenticated = Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => requestFetch(input, { ...init, headers: wolfpackLocalHeaders(url, init?.headers) }), { preconnect: requestFetch.preconnect }) as typeof fetch;
-    session = createVolatileTaskSession({ url, callerSession: sessionName, store, fetch: authenticated, ...(options.requestTimeoutMs !== undefined && { requestTimeoutMs: options.requestTimeoutMs }) });
+    session = createVolatileTaskSession({ url, callerSession: sessionName, store, fetch: authenticated, onChildEvent: intake => childEvents.accept(intake), ...(options.requestTimeoutMs !== undefined && { requestTimeoutMs: options.requestTimeoutMs }) });
     const core = await (options.rebind ? session.rebind(signal) : session.connect(signal));
     const active = new Set<Promise<unknown>>();
     let closed = false, closing: Promise<void> | undefined;
-    const owned = { ...core } as OwnedTaskCore;
+    const owned = { ...core, childEvents: { hasEvents: childEvents.hasEvents, takeEvents: childEvents.takeEvents, takeDiagnostics: childEvents.takeDiagnostics } } as OwnedTaskCore;
     const track = <T>(result: Promise<T>): Promise<T> => {
       active.add(result);
       void result.then(() => active.delete(result), () => active.delete(result));

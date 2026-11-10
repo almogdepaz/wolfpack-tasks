@@ -3,7 +3,7 @@ import { INVALID_RELAY_METADATA, TASK_PROTOCOL_VERSION, TaskProtocolError } from
 import type { RelayEnvelope, TaskEndpoint } from "./task-protocol";
 
 export { WOLFPACK_TASK_RELAY_ID } from "./wolfpack-endpoint-view";
-const WIRE_VERSION = 2;
+export const WIRE_VERSION = 2;
 interface WolfpackRelayEnvelope {
   readonly envelopeId: string; readonly protocolVersion: number;
   readonly source: TaskEndpoint; readonly target: TaskEndpoint;

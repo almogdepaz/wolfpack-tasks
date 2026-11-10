@@ -86,9 +86,10 @@ describe("v2-only package", () => {
 			expect(document).toContain("RELAY_STATE_LOST");
 			expect(document).toContain("unknown remote outcome");
 			expect(document).not.toContain("/task-relay-rebind");
-			expect(document).toContain("can lose even accepted mail");
+			expect(document).toMatch(/can (?:still )?lose even accepted mail/);
 		}
-		expect(readme).toContain("requires a compatible Wolfpack memory-owned server");
+		expect(readme).toContain("requires a compatible Wolfpack server using the existing wire interface");
+		expect(readme).toContain("plugin/agent-process restart recovery is not implemented");
 		expect(readme).toContain("No transport opt-in flag is needed");
 		expect(readme).toContain("`WOLFPACK_SESSION_NAME` resolves the active Pi process to its relay endpoint");
 		expect(`${readme}\n${skill}`).not.toContain("task-gateway.md");

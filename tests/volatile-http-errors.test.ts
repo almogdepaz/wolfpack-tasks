@@ -13,6 +13,49 @@ function setup(handler: (body: any) => Response, requestTimeoutMs = 12_000) {
   return { store, session, options, calls: () => calls, close: () => { session.close(); store.close(); } };
 }
 
+for (const [code, retryable] of [
+  ["RELAY_STORAGE_BUSY", true], ["RELAY_STORAGE_UNAVAILABLE", true], ["RELAY_STORAGE_UNCERTAIN", true],
+  ["RELAY_STORAGE_INVALID", false], ["RELAY_STORAGE_RECOVERY_BLOCKED", false], ["RELAY_STORAGE_RECOVERING", true],
+] as const) test(`epochless ${code} preserves its typed diagnosis and the same RAM binding`, async () => {
+  let rejecting = true;
+  const f = setup(() => rejecting
+    ? Response.json({ ok: false, profile, error: { code, retryable, ...(code !== "RELAY_STORAGE_RECOVERING" && { ownerFatal: true }), retryAfterMs: 1000 } }, { status: 503 })
+    : connected());
+  try {
+    await expect(f.session.connect()).rejects.toMatchObject({ code, retryable, details: { retryAfterMs: 1000 } });
+    const generation = f.store.getEndpointGeneration();
+    rejecting = false;
+    await f.session.connect();
+    expect(f.store.getRelayTransportBinding()).toMatchObject({ generation, profile, epoch });
+    expect(f.store.quarantinedOutbox()).toEqual([]);
+  } finally { f.close(); }
+});
+
+test("typed uncertain storage failure retains a live RAM task and retries only the original envelope", async () => {
+  let rejecting = true;
+  const sends: string[] = [];
+  const f = setup(body => {
+    if (body.operation === "connect") return connected();
+    if (body.operation === "resolve") return reply({ kind: "resolved", endpoint });
+    sends.push(JSON.stringify(body.envelope));
+    return rejecting ? Response.json({ ok: false, profile, error: { code: "RELAY_STORAGE_UNCERTAIN", retryable: true, ownerFatal: true, mayHaveBeenDelivered: true } }, { status: 503 })
+      : reply({ kind: "accepted", envelopeId: body.envelope.envelopeId, acceptanceId: epoch, duplicate: true, forwarding: "local" });
+  });
+  try {
+    const core = await f.session.connect(), binding = f.store.getRelayTransportBinding();
+    await expect(core.createTask({ target: endpoint, task: "retain this task", timeoutMs: 60_000 })).rejects.toMatchObject({
+      code: "RELAY_STORAGE_UNCERTAIN", retryable: true, details: { ownerFatal: true, mayHaveBeenDelivered: true },
+    });
+    const pending = f.store.outbox("pending"); expect(pending).toHaveLength(1);
+    expect(core.listTasks()).toHaveLength(1); expect(f.store.quarantinedOutbox()).toEqual([]);
+    expect(f.store.getRelayTransportBinding()).toEqual(binding);
+    rejecting = false; await core.flushOutbox();
+    expect(sends).toHaveLength(2); expect(sends[1]).toBe(sends[0]);
+    expect(f.store.outbox("accepted")).toHaveLength(1);
+    expect(await f.session.connect()).toBe(core);
+  } finally { f.close(); }
+});
+
 const httpFailures = [
   { name: "generic JSON 429", status: 429, body: JSON.stringify({ error: "rate limit exceeded" }), code: "RELAY_CAPACITY", retryable: true },
   { name: "empty 429", status: 429, body: null, code: "RELAY_CAPACITY", retryable: true },

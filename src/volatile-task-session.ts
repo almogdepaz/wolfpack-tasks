@@ -280,9 +280,14 @@ class Transport {
       if (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch) this.retire();
       if (data.ok === false && record(data.error) && text(data.error.code) && typeof data.error.retryable === "boolean") {
         if (RESET_CODES.has(data.error.code)) this.retire();
-        const epochlessRejection = data.epoch === undefined && ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code);
+        const ownerFailure = data.error.ownerFatal === true
+          && ["RELAY_STORAGE_BUSY", "RELAY_STORAGE_UNAVAILABLE", "RELAY_STORAGE_INVALID", "RELAY_STORAGE_UNCERTAIN", "RELAY_STORAGE_RECOVERY_BLOCKED"].includes(data.error.code);
+        const ownerCooldown = data.error.code === "RELAY_STORAGE_RECOVERING" && data.error.retryable === true
+          && typeof data.error.retryAfterMs === "number" && Number.isFinite(data.error.retryAfterMs) && data.error.retryAfterMs > 0;
+        const epochlessRejection = data.epoch === undefined && (ownerFailure || ownerCooldown
+          || ["RELAY_CAPACITY", "RELAY_UNAVAILABLE", "INVALID_REQUEST", "PEER_POLICY_REQUIRED"].includes(data.error.code));
         if ((!uuid(data.epoch) && !epochlessRejection) || (this.binding && uuid(data.epoch) && data.epoch !== this.binding.epoch)) throw failure("INVALID_RESPONSE", true);
-        const details = { ...((data.error.mayHaveBeenDelivered === true || data.error.code === "RELAY_UNAVAILABLE") && { mayHaveBeenDelivered: true }),
+        const details = { ...(ownerFailure && { ownerFatal: true }), ...((data.error.mayHaveBeenDelivered === true || data.error.code === "RELAY_UNAVAILABLE") && { mayHaveBeenDelivered: true }),
           ...(typeof data.error.retryAfterMs === "number" && Number.isFinite(data.error.retryAfterMs) && data.error.retryAfterMs >= 0 && { retryAfterMs: data.error.retryAfterMs }) };
         throw failure(data.error.code, data.error.retryable || RETRY_CODES.has(data.error.code), details);
       }

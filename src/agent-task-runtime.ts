@@ -7,6 +7,8 @@ import { taskWorkerModeEnabled, WORKER_GATE_DENIAL_CODE } from "./task-worker-mo
 import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
 import { RELAY_LOSS_CODES, taskErrorClass } from "./task-errors";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
+import { CHILD_EVENTS_CUSTOM_TYPE, CHILD_EVENTS_WAKE_CUSTOM_TYPE, CHILD_EVENTS_WAKE_TEXT, renderChildEvents } from "./child-events";
+import type { ChildEventQueue } from "./child-events";
 import { createConfiguredTaskCore } from "./configured-task-core";
 import type { OwnedTaskCore } from "./configured-task-core";
 import type { SubmitIntentInput, SubmitIntentOutcome, TaskCore } from "./task-core";
@@ -99,7 +101,7 @@ function defineTool<TParams extends TSchema>(tool: AgentTaskToolDefinition<TPara
 	return tool as unknown as AgentTaskToolDefinition;
 }
 
-export type ConfiguredCoreFactory = (signal?: AbortSignal, rebind?: boolean) => Promise<TaskCore & Partial<Pick<OwnedTaskCore, "close">>>;
+export type ConfiguredCoreFactory = (signal?: AbortSignal, rebind?: boolean) => Promise<TaskCore & Partial<Pick<OwnedTaskCore, "close" | "childEvents">>>;
 export interface ConfiguredCoreLoader extends ConfiguredCoreFactory {
 	close(): Promise<void>;
 	start(): Promise<void>;
@@ -239,14 +241,20 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 				};
 			},
 		};
-		const inboxOutboxError = await deliverTaskInbox({
-			sendMessage(message, options) { if (isCurrent()) host.sendMessage(message, options); },
-			appendEntry(customType, data) { if (isCurrent()) host.appendEntry(customType, data); },
-		}, guardedCore, {
-			isIdle: (): boolean => isCurrent() && context.isIdle(),
-			hasPendingMessages: (): boolean => !isCurrent() || context.hasPendingMessages(),
-			sessionManager: context.sessionManager,
-		}, signal, work);
+		let inboxOutboxError: unknown;
+		try {
+			inboxOutboxError = await deliverTaskInbox({
+				sendMessage(message, options) { if (isCurrent()) host.sendMessage(message, options); },
+				appendEntry(customType, data) { if (isCurrent()) host.appendEntry(customType, data); },
+			}, guardedCore, {
+				isIdle: (): boolean => isCurrent() && context.isIdle(),
+				hasPendingMessages: (): boolean => !isCurrent() || context.hasPendingMessages(),
+				sessionManager: context.sessionManager,
+			}, signal, work);
+		} finally {
+			// Task mail first. Child events received by this intake are presented even when task delivery failed.
+			if (isCurrent()) presentChildEvents(host, context, activeCore.childEvents);
+		}
 		return outboxError ?? inboxOutboxError;
 	});
 	const cancelBackgroundRefresh = (): void => {
@@ -569,6 +577,21 @@ interface TaskDeliveryEvidence {
 	readonly piInsertion: "not_confirmed" | "blocked" | "confirmed";
 	readonly wakeAcceptance: "not_confirmed" | "pending" | "confirmed";
 	readonly modelExecution: "not_evidenced";
+}
+
+/**
+ * Reports malformed-event diagnostics, then presents all pending child events as one entry and one follow-up wake.
+ * Like task mail, events wait while the host is busy or holds pending messages; they never steer an active turn.
+ * The entry details carry no task id, so task entry evidence ignores them.
+ */
+function presentChildEvents(host: AgentTaskHost, context: AgentTaskRuntimeContext, queue: ChildEventQueue | undefined): void {
+	if (!queue) return;
+	for (const diagnostic of queue.takeDiagnostics()) context.ui.notify(diagnostic, "warning");
+	if (!queue.hasEvents() || context.hasPendingMessages() || !context.isIdle()) return;
+	const batch = queue.takeEvents();
+	const details = { childEvents: batch.events.map((event) => ({ eventId: event.eventId, childSessionId: event.childSessionId, event: event.event })), dropped: batch.dropped };
+	host.sendMessage({ customType: CHILD_EVENTS_CUSTOM_TYPE, content: renderChildEvents(batch), display: true, details }, { triggerTurn: false });
+	host.sendMessage({ customType: CHILD_EVENTS_WAKE_CUSTOM_TYPE, content: CHILD_EVENTS_WAKE_TEXT, display: false, details }, { triggerTurn: true, deliverAs: "followUp" });
 }
 
 function taskDeliveryEvidence(task: TaskSnapshot): TaskDeliveryEvidence {

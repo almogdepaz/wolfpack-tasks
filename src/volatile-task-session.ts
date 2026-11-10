@@ -4,11 +4,17 @@ import { RESET_CODES, RETRY_CODES, taskErrorMessage } from "./task-errors";
 import { TASK_PROTOCOL_VERSION, TaskProtocolError } from "./task-protocol";
 import type { RelayTransportBinding, TaskEndpoint, TaskRelay } from "./task-protocol";
 import type { TaskStore } from "./task-store";
-import { fromWolfpackEnvelope, toWolfpackEnvelope, WOLFPACK_TASK_RELAY_ID } from "./wolfpack-task-relay";
+import { CHILD_EVENT_ACK_RETRY_LIMIT, CHILD_EVENT_RELAY_PROTOCOL, createChildEventDeduper, isChildEventPayload, parseChildEvent } from "./child-events";
+import type { ChildEventIntake } from "./child-events";
+import { fromWolfpackEnvelope, toWolfpackEnvelope, WIRE_VERSION, WOLFPACK_TASK_RELAY_ID } from "./wolfpack-task-relay";
 
 export const VOLATILE_PROFILE = "volatile-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CURSOR = /^(0|[1-9][0-9]{0,31})$/;
+/** Receive rounds per call while a page held only consumed child events and the relay reports more. */
+const CHILD_EVENT_PAGE_ROUNDS = 4;
+/** Hands one child-event payload to its consumer; the transport acknowledges it afterwards. */
+type ChildEventHandler = (envelopeId: string, payload: unknown) => void;
 
 export interface VolatileTaskSessionOptions {
   /** Explicit trusted endpoint ingress URL. No default route or installed server. */
@@ -18,6 +24,11 @@ export interface VolatileTaskSessionOptions {
   readonly store: TaskStore;
   readonly fetch?: typeof fetch;
   readonly requestTimeoutMs?: number;
+  /**
+   * Consumer of `wolfpack.child_event/v1` notices. Present: connect advertises the child-event capability. Child events
+   * never enter task core; each is handed here at most once per endpoint lifetime and then acknowledged.
+   */
+  readonly onChildEvent?: (intake: ChildEventIntake) => void;
 }
 export interface VolatileTaskSession {
   connect(signal?: AbortSignal): Promise<TaskCore>;
@@ -37,6 +48,13 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
   const requestFetch = options.fetch ?? fetch, store = options.store;
   let transport: Transport | undefined, core: TaskCore | undefined, busy = false, closed = false;
   let reset = false;
+  const childEventIds = createChildEventDeduper();
+  const handleChildEvent: ChildEventHandler = (envelopeId, payload) => {
+    if (!childEventIds.admit(envelopeId)) return;
+    const event = parseChildEvent(payload);
+    options.onChildEvent?.(typeof event === "string" ? { kind: "malformed", envelopeId, reason: event } : { kind: "event", envelopeId, event });
+  };
+  const protocolVersions = options.onChildEvent ? [WIRE_VERSION, CHILD_EVENT_RELAY_PROTOCOL] : [WIRE_VERSION];
   const saved = () => store.getRelayTransportBinding();
   const validateSaved = (binding: RelayTransportBinding) => {
     if (binding.profile !== VOLATILE_PROFILE || !UUID.test(binding.epoch) || !localEndpoint(binding.endpoint)
@@ -70,12 +88,12 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
         // Explicit acceptance of loss starts empty. Session history is the only
         // archive; old task identities/ACKs/outbox must never enter the new scope.
         transport?.stop(); core = undefined; reset = true;
-        store.clear(); prior = undefined; priorEndpoint = undefined;
+        store.clear(); childEventIds.clear(); prior = undefined; priorEndpoint = undefined;
       }
       const expectedBinding = saved();
       const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
       store.transaction(() => store.setEndpointGeneration(generation));
-      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset);
+      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, protocolVersions, handleChildEvent);
       transport = selected;
       const binding = await selected.register(signal);
       if (closed) throw failure("RELAY_CLOSED", false);
@@ -123,8 +141,11 @@ class Transport {
   private renewing: Promise<RelayTransportBinding> | undefined;
   private active = 0;
   private readonly waiters: Array<{ reserved: boolean; grant(): void }> = [];
+  /** Consumed child events whose ACK is not confirmed, oldest first. A transport serves one endpoint lifetime. */
+  private readonly unconfirmedChildAcks = new Set<string>();
   constructor(private url: string, private caller: string, private generation: string, prior: RelayTransportBinding | undefined,
-    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void) { this.binding = prior; }
+    private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void,
+    private protocolVersions: readonly number[], private onChildEvent: ChildEventHandler) { this.binding = prior; }
   stop(): void { this.stopSignal.abort(); }
   assertActive(): void { if (this.stopSignal.signal.aborted) throw failure("RELAY_RESET", false, { mayHaveBeenDelivered: true }); }
   assertStoredBinding(binding: RelayTransportBinding | undefined): void {
@@ -138,7 +159,7 @@ class Transport {
     if (this.renewing) return this.renewing;
     this.renewing = (async () => {
       const reply = await this.request({ operation: "connect", profile: VOLATILE_PROFILE, callerSession: this.caller, generation: this.generation,
-        protocolVersions: [2], leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
+        protocolVersions: this.protocolVersions, leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
       const value = reply.value;
       if (!record(value) || value.kind !== "connected" || !localEndpoint(value.endpoint) || typeof value.leaseExpiresAt !== "string" || !(Date.parse(value.leaseExpiresAt) > Date.now())) throw failure("INVALID_CONNECTION", true);
       if (this.binding && !same(this.binding.endpoint, value.endpoint)) this.retire();
@@ -179,20 +200,41 @@ class Transport {
         own(input.endpoint);
         if (!cursor(input.cursor) || !Number.isInteger(input.limit) || input.limit < 1) throw failure("INVALID_CURSOR", false);
         const limit = Math.min(input.limit, 50);
-        const value = await this.operation("receive", { cursor: input.cursor, limit }, signal);
-        if (value.kind !== "page" || !Array.isArray(value.deliveries) || value.deliveries.length > limit || !cursor(value.nextCursor) || typeof value.hasMore !== "boolean") throw failure("INVALID_INBOX", true);
-        let last = BigInt(input.cursor);
-        const ids = new Set<string>();
-        const deliveries = value.deliveries.map((item: unknown) => {
-          if (!record(item) || !cursor(item.cursor) || BigInt(item.cursor) <= last || !record(item.envelope)) throw failure("INVALID_INBOX", true);
-          if (!endpoint(item.envelope.source) || !localEndpoint(item.envelope.target)) throw failure("INVALID_INBOX", true);
-          const envelope = fromWolfpackEnvelope(item.envelope as unknown as Parameters<typeof fromWolfpackEnvelope>[0]);
-          if (!same(envelope.target, input.endpoint) || ids.has(envelope.envelopeId)) throw failure("INVALID_INBOX", true);
-          ids.add(envelope.envelopeId); last = BigInt(item.cursor);
-          return { cursor: item.cursor, envelope };
-        });
-        if (value.nextCursor !== (deliveries.at(-1)?.cursor ?? input.cursor) || (!deliveries.length && value.hasMore)) throw failure("INVALID_INBOX", true);
-        return { deliveries, nextCursor: value.nextCursor, hasMore: value.hasMore };
+        // Child events are consumed here and removed from the returned page, which then ends at its last task
+        // delivery. The relay deletes an acknowledged item, so a later read from the same cursor never sees it again.
+        for (let round = 1; ; round++) {
+          const value = await this.operation("receive", { cursor: input.cursor, limit }, signal);
+          if (value.kind !== "page" || !Array.isArray(value.deliveries) || value.deliveries.length > limit || !cursor(value.nextCursor) || typeof value.hasMore !== "boolean") throw failure("INVALID_INBOX", true);
+          let last = BigInt(input.cursor);
+          const ids = new Set<string>();
+          const deliveries: Array<{ cursor: string; envelope: ReturnType<typeof fromWolfpackEnvelope> }> = [];
+          const childEvents: string[] = [];
+          for (const item of value.deliveries as unknown[]) {
+            if (!record(item) || !cursor(item.cursor) || BigInt(item.cursor) <= last || !record(item.envelope)) throw failure("INVALID_INBOX", true);
+            if (!endpoint(item.envelope.source) || !localEndpoint(item.envelope.target)) throw failure("INVALID_INBOX", true);
+            if (isChildEventPayload(item.envelope.payload)) {
+              const envelopeId = item.envelope.envelopeId;
+              if (!text(envelopeId) || item.envelope.protocolVersion !== WIRE_VERSION || !same(item.envelope.target, input.endpoint) || ids.has(envelopeId)) throw failure("INVALID_INBOX", true);
+              ids.add(envelopeId); last = BigInt(item.cursor);
+              childEvents.push(envelopeId);
+              this.onChildEvent(envelopeId, item.envelope.payload);
+              continue;
+            }
+            const envelope = fromWolfpackEnvelope(item.envelope as unknown as Parameters<typeof fromWolfpackEnvelope>[0]);
+            if (!same(envelope.target, input.endpoint) || ids.has(envelope.envelopeId)) throw failure("INVALID_INBOX", true);
+            ids.add(envelope.envelopeId); last = BigInt(item.cursor);
+            deliveries.push({ cursor: item.cursor, envelope });
+          }
+          if (value.nextCursor !== ((value.deliveries.at(-1) as { cursor?: string } | undefined)?.cursor ?? input.cursor) || (!value.deliveries.length && value.hasMore)) throw failure("INVALID_INBOX", true);
+          const consumed = await this.acknowledgeChildEvents(childEvents, signal);
+          if (deliveries.length) return { deliveries, nextCursor: deliveries.at(-1)!.cursor, hasMore: value.hasMore };
+          // An empty page must not report more. Read again only while consumption is confirmed, so it cannot loop.
+          if (!value.hasMore || !consumed || round >= CHILD_EVENT_PAGE_ROUNDS) {
+            // Only a receive that returns no task mail retries older unconfirmed ACKs, so a retry never delays a task.
+            await this.retryChildAcks(new Set(childEvents), signal);
+            return { deliveries, nextCursor: input.cursor, hasMore: false };
+          }
+        }
       },
       acknowledgeDelivery: async (input, signal) => {
         own(input.endpoint);
@@ -201,6 +243,41 @@ class Transport {
         if (value.kind !== "acknowledged" || typeof value.duplicate !== "boolean") throw failure("INVALID_RESPONSE", true);
       },
     };
+  }
+  /**
+   * Acknowledges consumed child events. An unconfirmed ACK does not fail the task page. Its envelope id is held in
+   * `unconfirmedChildAcks`, independent of the task cursor, which may already be past the child event: a later receive
+   * retries it (`retryChildAcks`). If the relay delivers the child event again first, it is acknowledged again here,
+   * and the session's deduplication suppresses a second presentation. A reset or abort still fails.
+   */
+  private async acknowledgeChildEvents(envelopeIds: readonly string[], signal?: AbortSignal): Promise<boolean> {
+    let confirmed = true;
+    for (const envelopeId of envelopeIds) if (!await this.acknowledgeChildEvent(envelopeId, signal)) confirmed = false;
+    return confirmed;
+  }
+  /**
+   * Retries held child-event ACKs, oldest first, except the ones this receive already tried. It stops at the first
+   * unconfirmed ACK, so an unhealthy relay costs one request per receive; that envelope id moves to the end of the set.
+   */
+  private async retryChildAcks(tried: ReadonlySet<string>, signal?: AbortSignal): Promise<void> {
+    for (const envelopeId of [...this.unconfirmedChildAcks]) {
+      if (!tried.has(envelopeId) && !await this.acknowledgeChildEvent(envelopeId, signal)) return;
+    }
+  }
+  /** One child-event ACK. Only `acknowledged` (also as a duplicate) confirms it and releases the held envelope id. */
+  private async acknowledgeChildEvent(envelopeId: string, signal?: AbortSignal): Promise<boolean> {
+    let confirmed = false;
+    try {
+      confirmed = (await this.operation("acknowledge", { envelopeId }, signal)).kind === "acknowledged";
+    } catch (error) {
+      this.assertActive();
+      if (signal?.aborted) throw error;
+    }
+    this.unconfirmedChildAcks.delete(envelopeId);
+    if (confirmed) return true;
+    this.unconfirmedChildAcks.add(envelopeId);
+    if (this.unconfirmedChildAcks.size > CHILD_EVENT_ACK_RETRY_LIMIT) this.unconfirmedChildAcks.delete(this.unconfirmedChildAcks.values().next().value as string);
+    return false;
   }
   // FIFO in-flight slots: 8 for ordinary requests, 2 more held for acknowledge/connect.
   // A waiter has sent nothing, so its abort is a plain retryable ABORTED; RELAY_CAPACITY

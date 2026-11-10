@@ -7,6 +7,7 @@ import type { TaskInboxItem } from "../task-core";
 import { CLAUDE_PLUGIN, HARNESS_PRE_ASSIGNMENT_TOOLS } from "./constants";
 import type { ClaudeEnvironment } from "./environment";
 import { isRecord } from "./json-rpc";
+import { NOTIFY_PARENT_LISTING, NOTIFY_PARENT_TOOL, notifyParent, notifyParentAvailable } from "./notify-parent";
 import { createStatusFile } from "./status-file";
 import type { ClaudeStatusFile } from "./status-file";
 import { validateToolArguments } from "./validation";
@@ -31,6 +32,10 @@ export interface McpToolListing {
 
 export interface ClaudeTaskAdapterOptions {
 	readonly environment: ClaudeEnvironment;
+	/** The process environment, for local server auth. */
+	readonly env: Readonly<Record<string, string | undefined>>;
+	/** Test seam: the local server request of agent_notify_parent. */
+	readonly fetch?: typeof fetch;
 	/** Test seam: a fixed core instead of the configured Wolfpack transport. */
 	readonly core?: TaskCore;
 	readonly createCore?: ConfiguredCoreFactory;
@@ -169,7 +174,13 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 		return closed ? GATE_STOPPED : gateAnswer;
 	};
 
+	const notifyAvailable = notifyParentAvailable(environment, runtime.workerGateEnabled);
 	const executeTool = async (name: string, args: unknown, signal: AbortSignal): Promise<McpToolResult> => {
+		if (name === NOTIFY_PARENT_TOOL) {
+			if (!notifyAvailable) return errorResult(`${NOTIFY_PARENT_TOOL} is not available: it requires WOLFPACK_PARENT_SESSION_ID and a session that is not a task worker`);
+			wake?.activity("busy");
+			return notifyParent(args, { environment, env: options.env, fetch: options.fetch ?? fetch, signal });
+		}
 		const tool = tools.get(name);
 		if (!tool) return errorResult(`unknown tool ${JSON.stringify(name.slice(0, 64))}`);
 		let params: unknown;
@@ -208,7 +219,7 @@ export function createClaudeTaskAdapter(options: ClaudeTaskAdapterOptions): Clau
 	};
 
 	return {
-		tools: listing(runtime, true),
+		tools: listing(runtime, true, notifyAvailable),
 		channel: true,
 		async start(protocol) {
 			if (started || closed) return;
@@ -288,7 +299,7 @@ function inactiveAdapter(environment: Exclude<ClaudeEnvironment, { kind: "ready"
 		? "not a wolfpack session: WOLFPACK_SESSION_ID and WOLFPACK_SESSION_NAME are required; task tools are unavailable"
 		: `wolfpack tasks misconfigured: ${environment.variable} ${environment.reason}`;
 	return {
-		tools: listing(runtime, false),
+		tools: listing(runtime, false, false),
 		channel: false,
 		async start() { /* inactive */ },
 		async callTool() { return errorResult(message); },
@@ -297,7 +308,7 @@ function inactiveAdapter(environment: Exclude<ClaudeEnvironment, { kind: "ready"
 	};
 }
 
-function listing(runtime: AgentTaskRuntime, active: boolean): McpToolListing[] {
+function listing(runtime: AgentTaskRuntime, active: boolean, notify: boolean): McpToolListing[] {
 	const tools: McpToolListing[] = runtime.tools.map((tool) => ({
 		name: tool.name,
 		title: tool.label,
@@ -306,6 +317,7 @@ function listing(runtime: AgentTaskRuntime, active: boolean): McpToolListing[] {
 		// The pointer names agent_task_inbox, so it must not be deferred behind tool search in a live session.
 		...(active && tool.name === INBOX_TOOL && { _meta: { "anthropic/alwaysLoad": true } }),
 	}));
+	if (notify) tools.push(NOTIFY_PARENT_LISTING);
 	tools.push({
 		name: CLAUDE_PLUGIN.lifecycleTool,
 		title: "Task lifecycle hook endpoint",

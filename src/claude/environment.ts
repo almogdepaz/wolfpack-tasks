@@ -13,7 +13,11 @@ export type ClaudeEnvironment =
 	| { readonly kind: "inactive" }
 	/** Wolfpack identity is present but a required value is missing or invalid. */
 	| { readonly kind: "misconfigured"; readonly variable: string; readonly reason: string }
-	| { readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string; readonly gateSocketPath: string };
+	| {
+		readonly kind: "ready"; readonly sessionId: string; readonly sessionName: string; readonly port: string; readonly stateDir: string; readonly statusPath: string; readonly gateSocketPath: string;
+		/** The spawning session (WOLFPACK_PARENT_SESSION_ID / _NAME, trimmed), present only when set and not blank. */
+		readonly parentSessionId?: string; readonly parentSessionName?: string;
+	};
 
 /**
  * The identity gate is exactly WOLFPACK_SESSION_ID plus WOLFPACK_SESSION_NAME. With identity present, the values the
@@ -37,7 +41,11 @@ export function readClaudeEnvironment(env: Readonly<Record<string, string | unde
 		stateDir = join(env.HOME, ".wolfpack");
 	}
 	const directory = join(stateDir, CLAUDE_PLUGIN.statusDirectory);
-	return { kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(directory, `${sessionId}.json`), gateSocketPath: gateSocketPath(directory, sessionId) };
+	const parentSessionId = env.WOLFPACK_PARENT_SESSION_ID?.trim(), parentSessionName = env.WOLFPACK_PARENT_SESSION_NAME?.trim();
+	return {
+		kind: "ready", sessionId, sessionName, port, stateDir, statusPath: join(directory, `${sessionId}.json`), gateSocketPath: gateSocketPath(directory, sessionId),
+		...(parentSessionId && { parentSessionId }), ...(parentSessionName && { parentSessionName }),
+	};
 }
 
 /**

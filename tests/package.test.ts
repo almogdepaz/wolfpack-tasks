@@ -132,7 +132,7 @@ describe("v2-only package", () => {
 	test("references only the relay-v2 control API", async () => {
 		const documents = await Promise.all([readUsageDocumentation(), readFile(delegationSkillPath, "utf8")]);
 		const links = documents.flatMap((document) => [...document.matchAll(/https:\/\/github\.com\/almogdepaz\/wolfpack\/blob\/main\/docs\/([^\s)#]+\.md)(?:#[^\s)]+)?/g)].map((match) => match[1]));
-		expect(new Set(links)).toEqual(new Set(["control-api-schema.md"]));
+		expect(new Set(links)).toEqual(new Set(["control-api-schema.md", "task-recovery.md"]));
 	});
 
 	test("keeps role reuse, parent verification and acknowledgment, child teardown, and worker containment", async () => {

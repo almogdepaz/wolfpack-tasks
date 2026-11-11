@@ -49,6 +49,7 @@ export const TASK_ERRORS: Readonly<Record<string, TaskErrorSpec>> = {
 	RELAY_RESET: { class: "state", retryable: false, resetsBinding: true, relayLoss: true, message: "relay lifetime was reset" },
 	RELAY_REBIND_REQUIRED: { class: "state", retryable: false, relayLoss: true, message: "relay binding must be replaced" },
 	RELAY_STATE_LOST: { class: "state", retryable: false, message: "relay task state was lost" },
+	SESSION_ALREADY_REGISTERED: { class: "state", retryable: true, message: "SESSION_ALREADY_REGISTERED: another process owns this session; task relay registration is disabled for this process after the lease retry window" },
 	REGISTRATION_EXPIRED: { class: "state", retryable: false, resetsBinding: true, message: "relay registration expired" },
 	SOURCE_MISMATCH: { class: "state", retryable: false, resetsBinding: true, message: "relay source does not match the binding" },
 	CALLER_DEAD: { class: "state", retryable: false, resetsBinding: true, message: "calling session is gone" },

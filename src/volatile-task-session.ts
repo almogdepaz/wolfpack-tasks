@@ -1,3 +1,4 @@
+import { abortableSleep } from "./abortable-sleep";
 import { createTaskCore } from "./task-core";
 import type { TaskCore } from "./task-core";
 import { RESET_CODES, RETRY_CODES, taskErrorMessage } from "./task-errors";
@@ -10,6 +11,12 @@ import { fromWolfpackEnvelope, toWolfpackEnvelope, WIRE_VERSION, WOLFPACK_TASK_R
 
 export const VOLATILE_PROFILE = "volatile-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OWNER_RETRY_WINDOW_MS = 70_000;
+const DISCONNECT_TIMEOUT_MS = 1000;
+interface RegistrationContention { refusedAt?: number; retryAt?: number; disabled?: boolean; pendingGeneration?: string }
+// Process-lifetime policy, scoped to a relay/session identity. Recreating an adapter
+// or cancelling setup must not restart the retry window or bypass a refusal.
+const registrationContentions = new Map<string, RegistrationContention>();
 const CURSOR = /^(0|[1-9][0-9]{0,31})$/;
 /** Receive rounds per call while a page held only consumed child events and the relay reports more. */
 const CHILD_EVENT_PAGE_ROUNDS = 4;
@@ -35,7 +42,8 @@ export interface VolatileTaskSession {
   /** Explicitly retire the prior binding; never migrate historical task identities. */
   rebind(signal?: AbortSignal): Promise<TaskCore>;
   status(): { readonly state: "unbound" | "ready" | "reset" | "closed"; readonly binding: RelayTransportBinding | undefined };
-  close(): void;
+  /** Fence work immediately and best-effort release the owned lease within one second. */
+  close(): Promise<void>;
 }
 
 /** Epoch-bound transport used by the normal extension; caller owns the store. */
@@ -47,7 +55,10 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15_000) throw new TypeError("invalid relay request deadline");
   const requestFetch = options.fetch ?? fetch, store = options.store;
   let transport: Transport | undefined, core: TaskCore | undefined, busy = false, closed = false;
-  let reset = false;
+  let reset = false, closing: Promise<void> | undefined;
+  const contentionKey = JSON.stringify([url.href, options.callerSession]);
+  const contention = registrationContentions.get(contentionKey) ?? {};
+  registrationContentions.set(contentionKey, contention);
   const childEventIds = createChildEventDeduper();
   const handleChildEvent: ChildEventHandler = (envelopeId, payload) => {
     if (!childEventIds.admit(envelopeId)) return;
@@ -76,6 +87,7 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
   };
   const open = async (replace: boolean, signal?: AbortSignal): Promise<TaskCore> => {
     if (closed) throw failure("RELAY_CLOSED", false);
+    if (contention.disabled) throw failure("SESSION_ALREADY_REGISTERED", false);
     if (signal?.aborted) throw failure("ABORTED", true);
     if (busy) throw failure("RELAY_BUSY", true);
     if (!replace && core) { transport!.assertStoredBinding(saved()); await core.connect(signal); return core; }
@@ -87,15 +99,25 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
       if (replace) {
         // Explicit acceptance of loss starts empty. Session history is the only
         // archive; old task identities/ACKs/outbox must never enter the new scope.
-        transport?.stop(); core = undefined; reset = true;
+        // Release only our known binding, never discover or disconnect another owner.
+        const old = transport ?? (prior && prior.url === url.href && prior.callerSession === options.callerSession
+          ? new Transport(prior.url, prior.callerSession, prior.generation, prior, requestFetch, timeoutMs, onReset, protocolVersions, handleChildEvent, contention) : undefined);
+        await old?.disconnect();
+        if (closed) throw failure("RELAY_CLOSED", false);
+        if (signal?.aborted) throw failure("ABORTED", true);
+        core = undefined; reset = true;
         store.clear(); childEventIds.clear(); prior = undefined; priorEndpoint = undefined;
       }
       const expectedBinding = saved();
-      const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
+      // An accepted connect whose reply was lost still holds a lease. Keep its
+      // generation across failed configured factories until a binding is known.
+      const generation = prior?.generation ?? store.getEndpointGeneration() ?? contention.pendingGeneration ?? crypto.randomUUID();
+      if (!prior) contention.pendingGeneration = generation;
       store.transaction(() => store.setEndpointGeneration(generation));
-      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, protocolVersions, handleChildEvent);
+      const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, protocolVersions, handleChildEvent, contention);
       transport = selected;
       const binding = await selected.register(signal);
+      if (contention.pendingGeneration === generation) contention.pendingGeneration = undefined;
       if (closed) throw failure("RELAY_CLOSED", false);
       store.transaction(() => {
         const current = saved(), currentEndpoint = store.getEndpointBinding();
@@ -130,7 +152,7 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
   return {
     connect: signal => open(false, signal), rebind: signal => open(true, signal),
     status: () => ({ state: closed ? "closed" : reset || saved()?.reset ? "reset" : core ? "ready" : "unbound", binding: saved() }),
-    close() { closed = true; transport?.stop(); },
+    close() { closed = true; return closing ??= transport?.disconnect() ?? Promise.resolve(); },
   };
 }
 
@@ -145,8 +167,22 @@ class Transport {
   private readonly unconfirmedChildAcks = new Set<string>();
   constructor(private url: string, private caller: string, private generation: string, prior: RelayTransportBinding | undefined,
     private fetcher: typeof fetch, private timeoutMs: number, private onReset: (expected: RelayTransportBinding | undefined) => void,
-    private protocolVersions: readonly number[], private onChildEvent: ChildEventHandler) { this.binding = prior; }
+    private protocolVersions: readonly number[], private onChildEvent: ChildEventHandler,
+    private contention: RegistrationContention) { this.binding = prior; }
   stop(): void { this.stopSignal.abort(); }
+  async disconnect(): Promise<void> {
+    this.stop();
+    const binding = this.binding;
+    if (!binding) return;
+    // Cleanup has its own short deadline: stopping ordinary requests must not abort it.
+    const cleanup = new Transport(binding.url, binding.callerSession, binding.generation, binding, this.fetcher,
+      Math.min(this.timeoutMs, DISCONNECT_TIMEOUT_MS), () => {}, this.protocolVersions, this.onChildEvent, {});
+    try {
+      await cleanup.request({ operation: "disconnect", profile: binding.profile, epoch: binding.epoch,
+        callerSession: binding.callerSession, endpoint: binding.endpoint });
+    } catch { /* Best effort: an unavailable relay or stale binding falls back to lease expiry. */ }
+    finally { cleanup.stop(); }
+  }
   assertActive(): void { if (this.stopSignal.signal.aborted) throw failure("RELAY_RESET", false, { mayHaveBeenDelivered: true }); }
   assertStoredBinding(binding: RelayTransportBinding | undefined): void {
     this.assertActive();
@@ -158,8 +194,7 @@ class Transport {
     if (this.binding && this.expiresAt - Date.now() > this.timeoutMs + 10_000) return this.binding;
     if (this.renewing) return this.renewing;
     this.renewing = (async () => {
-      const reply = await this.request({ operation: "connect", profile: VOLATILE_PROFILE, callerSession: this.caller, generation: this.generation,
-        protocolVersions: this.protocolVersions, leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
+      const reply = await this.registerWithRetry(signal);
       const value = reply.value;
       if (!record(value) || value.kind !== "connected" || !localEndpoint(value.endpoint) || typeof value.leaseExpiresAt !== "string" || !(Date.parse(value.leaseExpiresAt) > Date.now())) throw failure("INVALID_CONNECTION", true);
       if (this.binding && !same(this.binding.endpoint, value.endpoint)) this.retire();
@@ -168,6 +203,33 @@ class Transport {
       return this.binding;
     })();
     try { return await this.renewing; } finally { this.renewing = undefined; }
+  }
+  private async registerWithRetry(signal?: AbortSignal): Promise<{ epoch: string; value: unknown }> {
+    const combined = signal ? AbortSignal.any([signal, this.stopSignal.signal]) : this.stopSignal.signal;
+    for (;;) {
+      this.assertActive();
+      if (this.contention.disabled || (this.contention.refusedAt !== undefined && Date.now() - this.contention.refusedAt >= OWNER_RETRY_WINDOW_MS)) {
+        this.contention.disabled = true;
+        throw failure("SESSION_ALREADY_REGISTERED", false);
+      }
+      const wait = (this.contention.retryAt ?? 0) - Date.now();
+      if (wait > 0) {
+        await abortableSleep(wait, combined, () => failure("ABORTED", true));
+        continue;
+      }
+      try {
+        const reply = await this.request({ operation: "connect", profile: VOLATILE_PROFILE, callerSession: this.caller, generation: this.generation,
+          protocolVersions: this.protocolVersions, leaseMs: 60_000, ...(this.binding && { epoch: this.binding.epoch }) }, signal);
+        this.contention.refusedAt = undefined; this.contention.retryAt = undefined;
+        return reply;
+      } catch (error) {
+        if (!(error instanceof TaskProtocolError) || error.code !== "SESSION_ALREADY_REGISTERED") throw error;
+        this.contention.refusedAt ??= Date.now();
+        const remaining = OWNER_RETRY_WINDOW_MS - (Date.now() - this.contention.refusedAt);
+        const delay = typeof error.details?.retryAfterMs === "number" ? error.details.retryAfterMs : 1000;
+        this.contention.retryAt = Date.now() + Math.max(0, Math.min(remaining, Math.max(1, delay)));
+      }
+    }
   }
   private async operation(operation: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const binding = await this.register(signal);

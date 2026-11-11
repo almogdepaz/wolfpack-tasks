@@ -13,8 +13,8 @@ afterEach(() => {
 async function runPi(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const home = mkdtempSync("/tmp/pi-tasks-node-runtime-");
 	temporaryDirectories.push(home);
-	// The extension registers on the relay named by WOLFPACK_SESSION_NAME/WOLFPACK_PORT. Inheriting them would replace the
-	// caller's own task endpoint, so the spawned pi gets no wolfpack identity and is never a task worker.
+	// The extension registers on the relay named by WOLFPACK_SESSION_NAME/WOLFPACK_PORT. The spawned Pi must not
+	// contend for the caller's task endpoint, so it gets no wolfpack identity and is never a task worker.
 	const env: Record<string, string> = { HOME: home };
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !key.startsWith("WOLFPACK_") && key !== "PI_TASK_WORKER" && key !== "HOME") env[key] = value;
 	const subprocess = Bun.spawn([
@@ -59,7 +59,8 @@ test("the spawned pi does not use the caller's wolfpack identity", async () => {
 		requests.push(`${request.method} ${new URL(request.url).pathname} ${await request.text()}`);
 		return Response.json({ ok: false, error: { code: "RELAY_UNAVAILABLE", retryable: true } }, { status: 503 });
 	} });
-	const caller = { WOLFPACK_SESSION_NAME: "caller-session", WOLFPACK_PORT: String(relay.port) };
+	const caller = { WOLFPACK_SESSION_NAME: "caller-session", WOLFPACK_SESSION_ID: crypto.randomUUID(),
+		WOLFPACK_PORT: String(relay.port), PI_TASK_WORKER: "1", WOLFPACK_TASK_WORKER: "1", WOLFPACK_PARENT_SESSION_ID: crypto.randomUUID() };
 	const previous = Object.fromEntries(Object.keys(caller).map((key) => [key, process.env[key]]));
 	Object.assign(process.env, caller);
 	try {

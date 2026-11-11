@@ -86,6 +86,9 @@ test.skipIf(!wolfpack)("normal extension starts, polls, closes, reopens and auto
     expect(messages.some(message => message.details?.taskId === result.details.taskId)).toBe(true);
     const lost = await tools.agent_task_send.execute("lost-task", { to: resetEndpoint, task: "active when relay resets", timeoutMs: 60_000 }, undefined);
     expect(lost.isError).not.toBe(true);
+    // Drain the send-triggered refresh before replacing the worker. Otherwise
+    // it can start recovery during shutdown, before the explicit refresh below.
+    await events.agent_settled!({}, context);
     await worker.close(); worker = makeWorker(); await worker.initialize();
     await events.agent_settled!({}, context);
     expect(commands["task-relay-rebind"]).toBeUndefined();

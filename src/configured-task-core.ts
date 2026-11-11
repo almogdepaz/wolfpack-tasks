@@ -70,12 +70,12 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
     owned.close = () => {
       if (closing) return closing;
       closed = true;
-      session!.close();
-      closing = Promise.allSettled([...active]).then(() => { store.close(); });
+      const disconnecting = session!.close();
+      closing = Promise.allSettled([...active, disconnecting]).then(() => { store.close(); });
       return closing;
     };
     return owned;
   } catch (error) {
-    session?.close(); store.close(); throw error;
+    await session?.close(); store.close(); throw error;
   }
 }

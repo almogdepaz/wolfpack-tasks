@@ -110,7 +110,7 @@ const node = Bun.which("node");
 describe("bundle under node", () => {
 	test.skipIf(!node)("without wolfpack identity it answers MCP, refuses tools, and writes nothing to stderr", async () => {
 		const env: Record<string, string> = {};
-		for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !key.startsWith("WOLFPACK_")) env[key] = value;
+		for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !key.startsWith("WOLFPACK_") && key !== "PI_TASK_WORKER") env[key] = value;
 		const child = Bun.spawn([node!, bundlePath], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
 		const requests = [
 			{ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "claude-code", version: "test" } } },

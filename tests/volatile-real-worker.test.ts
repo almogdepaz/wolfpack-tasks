@@ -80,7 +80,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const target = resolved.value.endpoint;
     expect(await failure(ac.createTask({ target, task: "first", timeoutMs: 60_000 }))).toMatchObject({ code: "PEER_UNREACHABLE", retryable: true });
     expect(aStore.outbox("pending")).toHaveLength(1); expect(aStore.outbox("accepted")).toEqual([]);
-    aSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
+    await aSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     aSession = createVolatileTaskSession({ url: a.url, callerSession: "origin", store: aStore }); sessions.push(aSession);
     ac = await aSession.connect();
     expect(aStore.getRelayTransportBinding()).toEqual(aBinding);
@@ -93,7 +93,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const first = relayDeliveries(await bc.receive()); expect(first.map(d => d.cursor)).toEqual(["1", "2", "3"]);
     expect(await failure(bc.acknowledgeRelayDelivery("2"))).toMatchObject({ code: "RELAY_UNAVAILABLE" });
     expect(bStore.getReceiveCursor()).toBe("0");
-    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
+    await bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     bc = await bSession.connect(); // RAM-owned, epoch-bound ACK intent retries without a RAM map.
     const ackCalls = b.calls.filter(call => call.operation === "acknowledge");
@@ -102,7 +102,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     const sparse = relayDeliveries(await bc.receive()); expect(sparse.map(d => d.cursor)).toEqual(["1", "3"]);
     expect(sparse[1]!.envelope.envelopeId).toBe(first[2]!.envelope.envelopeId);
     await bc.acknowledgeRelayDelivery("3");
-    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
+    await bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     bc = await bSession.connect();
     expect(bStore.getRelayTransportBinding()).toEqual(bBinding);
@@ -115,7 +115,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     expect(aStore.quarantinedOutbox()).toHaveLength(1);
     const attempts = peerFrames.length; await ac.flushOutbox(); expect(peerFrames).toHaveLength(attempts);
     expect(aSession.status().state).toBe("ready"); // Peer failure does not rotate this source.
-    bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
+    await bSession.close(); // Reconnect the transport within this RAM-owned endpoint lifetime.
     bSession = createVolatileTaskSession({ url: b.url, callerSession: "receiver", store: bStore }); sessions.push(bSession);
     const beforeConnect = b.calls.length;
     await expect(bSession.connect()).rejects.toMatchObject({ code: "RELAY_REBIND_REQUIRED" });
@@ -129,7 +129,7 @@ test.skipIf(!wolfpack)("actual volatile adapter/HTTP/workers: sparse ACKs, peer 
     await fresh.createTask({ target: fresh.endpoint, task: "new lifetime", timeoutMs: 60_000 });
     expect(relayDeliveries(await fresh.receive()).map(d => d.cursor)).toEqual(["1"]);
   } finally {
-    for (const session of sessions) session.close();
+    await Promise.all(sessions.map(session => session.close()));
     for (const store of stores) store.close();
     await Promise.all(servers.map(server => server.stop(true)));
     await Promise.all(workers.map(worker => worker.close()));

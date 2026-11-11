@@ -136,6 +136,7 @@ test("explicit rebind fences an in-flight old send and its late acceptance", asy
   const f = fixture(body => {
     if (body.operation === "connect") return ++connects === 1 ? connected() : connected(nextEndpoint, otherEpoch);
     if (body.operation === "resolve") return reply({ kind: "resolved", endpoint: body.target });
+    if (body.operation === "disconnect") return reply({ kind: "disconnected" });
     sent = body; started(); return new Promise<Response>(resolve => { release = resolve; });
   });
   try {
@@ -163,6 +164,7 @@ test("a late reset from another controller cannot quarantine a successor's pendi
   const sending = new Promise<void>(resolve => { started = resolve; });
   const f = fixture(body => {
     if (body.operation === "connect") return ++connects === 1 ? connected() : connected(nextEndpoint, otherEpoch);
+    if (body.operation === "disconnect") return reply({ kind: "disconnected" });
     const isNew = body.endpoint.id === nextEndpoint.id;
     if (body.operation === "resolve") return reply({ kind: "resolved", endpoint: body.target }, isNew ? otherEpoch : epoch);
     if (isNew) return Response.json({ ok: false, profile: VOLATILE_PROFILE, epoch: otherEpoch, error: { code: "PEER_UNREACHABLE", retryable: true } });

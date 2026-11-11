@@ -84,6 +84,26 @@ test("the configured adapter does not recreate a disabled transport on lifecycle
   } finally { await loader.close(); await f.close(); }
 });
 
+test("a lost initial connect reply retries the same generation across configured setup attempts", async () => {
+  jest.useFakeTimers();
+  let generation: string | undefined;
+  const f = fixture(body => {
+    if (body.operation === "disconnect") return disconnected();
+    if (!generation) { generation = body.generation; throw new Error("accepted reply lost"); }
+    return body.generation === generation ? connected() : refused();
+  });
+  const options = { sessionName: crypto.randomUUID(), baseUrl: "http://127.0.0.1:1", fetch: f.fetcher };
+  try {
+    await expect(createConfiguredTaskCore(options)).rejects.toMatchObject({ code: "RELAY_UNAVAILABLE" });
+    const pending = createConfiguredTaskCore(options);
+    await settle();
+    expect(f.calls[1].generation).toBe(f.calls[0].generation);
+    const core = await pending;
+    expect(core.endpoint).toEqual(endpoint);
+    await core.close();
+  } finally { await f.close(); }
+});
+
 test("cancelled setup cannot restart the process retry window or retry before the lease delay", async () => {
   jest.useFakeTimers();
   const f = fixture(() => refused());

@@ -13,7 +13,7 @@ export const VOLATILE_PROFILE = "volatile-v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OWNER_RETRY_WINDOW_MS = 70_000;
 const DISCONNECT_TIMEOUT_MS = 1000;
-interface RegistrationContention { refusedAt?: number; retryAt?: number; disabled?: boolean }
+interface RegistrationContention { refusedAt?: number; retryAt?: number; disabled?: boolean; pendingGeneration?: string }
 // Process-lifetime policy, scoped to a relay/session identity. Recreating an adapter
 // or cancelling setup must not restart the retry window or bypass a refusal.
 const registrationContentions = new Map<string, RegistrationContention>();
@@ -109,11 +109,15 @@ export function createVolatileTaskSession(options: VolatileTaskSessionOptions): 
         store.clear(); childEventIds.clear(); prior = undefined; priorEndpoint = undefined;
       }
       const expectedBinding = saved();
-      const generation = replace ? crypto.randomUUID() : prior?.generation ?? store.getEndpointGeneration() ?? crypto.randomUUID();
+      // An accepted connect whose reply was lost still holds a lease. Keep its
+      // generation across failed configured factories until a binding is known.
+      const generation = prior?.generation ?? store.getEndpointGeneration() ?? contention.pendingGeneration ?? crypto.randomUUID();
+      if (!prior) contention.pendingGeneration = generation;
       store.transaction(() => store.setEndpointGeneration(generation));
       const selected = new Transport(url.href, options.callerSession, generation, replace ? undefined : prior, requestFetch, timeoutMs, onReset, protocolVersions, handleChildEvent, contention);
       transport = selected;
       const binding = await selected.register(signal);
+      if (contention.pendingGeneration === generation) contention.pendingGeneration = undefined;
       if (closed) throw failure("RELAY_CLOSED", false);
       store.transaction(() => {
         const current = saved(), currentEndpoint = store.getEndpointBinding();

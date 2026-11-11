@@ -74,11 +74,53 @@ test("an idle session that ignores the pointer is nudged once through wolfpack, 
 	await f.vt.advance(10 * 60_000);
 	expect(f.commands).toHaveLength(3);
 
-	// Fallback mode: no channel emission, the shorter grace, still once per pointer.
+	// Fallback mode: still emits a channel pointer, with the shorter grace and once per pointer.
 	f.wake.inboxCalled();
 	f.wake.requestPointer({ task_id: "t2" });
-	expect(f.channel).toHaveLength(1);
+	expect(f.channel).toEqual([{ task_id: "t1" }, { task_id: "t2" }]);
 	await f.vt.advance(DEFAULT_WAKE_TIMING.fallbackGraceMs);
+	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT, STATUS, PASTE, SUBMIT]);
+	f.wake.close();
+});
+
+test("fallback mail emits a channel pointer even when its submit is skipped", async () => {
+	const paste = suspendedPaste();
+	let suspend = false;
+	const f = fixture(READY, (argv) => suspend ? paste.run(argv) : answer(READY)(argv));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.wake.mode).toBe("fallback");
+	f.wake.inboxCalled();
+	suspend = true;
+	f.wake.requestPointer({ task_id: "t2" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.fallbackGraceMs);
+	f.wake.activity("busy");
+	paste.release();
+	await f.vt.advance(1);
+	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT, STATUS, PASTE]);
+	expect(f.patches.at(-1)?.lastNudgeError).toBe("submit skipped: session busy during paste");
+	expect(f.channel).toEqual([{ task_id: "t1" }, { task_id: "t2" }]);
+	f.wake.close();
+});
+
+test("an unnudged pointer answered in fallback restores channel mode and its full grace", async () => {
+	const f = fixture();
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("fallback");
+	// An unsolicited inbox call is not evidence that a new channel pointer worked.
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("fallback");
+	f.wake.requestPointer({ task_id: "t2" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.fallbackGraceMs - 1);
+	f.wake.inboxCalled();
+	expect(f.wake.mode).toBe("channel");
+	expect(f.patches.at(-1)).toMatchObject({ wake: "channel", lastInboxAt: f.vt.now() });
+	f.wake.requestPointer({ task_id: "t3" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs - 1);
+	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT]);
+	await f.vt.advance(1);
 	expect(f.commands).toEqual([STATUS, PASTE, SUBMIT, STATUS, PASTE, SUBMIT]);
 	f.wake.close();
 });
@@ -186,6 +228,29 @@ test.each([
 	expect(f.vt.now() - start).toBeLessThan(RELAY_WAKE_DEADLINE_MS);
 	expect(f.wake.mode).toBe("fallback");
 	expect(f.patches.some((patch) => patch.statusFailures === 1)).toBe(true);
+	f.wake.close();
+});
+
+test("a successful submit clears the previous nudge error in reported status", async () => {
+	const f = fixture(READY, flakyStatus(1, unavailable));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.patches.at(-1)?.lastNudgeError).toBeString();
+	await f.vt.advance(DEFAULT_WAKE_TIMING.statusRetryMs);
+	expect(f.commands).toEqual([STATUS, STATUS, PASTE, SUBMIT]);
+	expect(f.patches.at(-1)).toMatchObject({ lastNudgeAt: f.vt.now(), lastNudgeError: null });
+	f.wake.close();
+});
+
+test("an inbox call clears the previous nudge error in reported status", async () => {
+	const f = fixture(READY, flakyStatus(1, unavailable));
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.patches.at(-1)?.lastNudgeError).toBeString();
+	f.wake.inboxCalled();
+	expect(f.patches.at(-1)).toMatchObject({ lastInboxAt: f.vt.now(), lastNudgeError: null });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.statusRetryMs);
+	expect(f.commands).toEqual([STATUS]);
 	f.wake.close();
 });
 

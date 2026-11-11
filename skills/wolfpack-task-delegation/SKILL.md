@@ -31,20 +31,13 @@ never combine a plan-driven spawn with a narrower endpoint task. prefer one cohe
 
 ## role model selection
 
-Role models are explicit and configurable at spawn time. The defaults below are Pi models:
-
-```bash
-IMPLEMENTER_MODEL="${WOLFPACK_IMPLEMENTER_MODEL:-openai-codex/gpt-5.6-terra}"
-REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
-```
-
-Pass `--model "$IMPLEMENTER_MODEL"` when spawning the editing implementer and `--model "$REVIEWER_MODEL"` when spawning the read-only reviewer. an explicit user or project model choice overrides the environment/default. never infer role or model from the session name, and never omit the resolved model because the current parent default may differ.
+This package names no models. Spawn mechanics, including model selection, belong to `wolfpack-tailnet-control`. In short: pass `--model "$WOLFPACK_IMPLEMENTER_MODEL"` for the editing implementer or `--model "$WOLFPACK_REVIEWER_MODEL"` for the read-only reviewer when that variable is set; otherwise omit `--model`, so the Pi child uses its configured default model. An explicit user or project model choice overrides both. never infer role or model from the session name.
 
 ## v2 requirements and addressing
 
 - load the task adapter in every participating session (Pi: this package's default extension; Claude Code: the `wolfpack-tasks` plugin) and set `WOLFPACK_SESSION_NAME`. Set `WOLFPACK_PORT` only when the local Wolfpack control port differs from `18790`.
 - address `agent_task_send` targets only as `to: { relay, id }`. For the default Wolfpack adapter, the relay is `wolfpack-pi-tasks-v2` and the ID is opaque.
-- create an endpoint worker with opt-in readiness and no initial assignment prompt: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json` (or `"$REVIEWER_MODEL"` for review). Use the actual explicit project root. This mode currently launches Pi workers only and rejects prompts/plans and `--notify-parent`; do not start a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
+- create an endpoint worker with opt-in readiness and no initial assignment prompt: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --task-worker --readiness-timeout-ms 30000 --json`, plus the role `--model` only when the role selection above provides one. Use the actual explicit project root. This mode currently launches Pi workers only and rejects prompts/plans and `--notify-parent`; do not start a blocking “wait for assignments” prompt. Put the complete instructions in `agent_task_send.task`.
 - read the returned `taskEndpoint` after exact live session/root and relay registration readiness succeeds. For a selected existing session, inspect structured status by its stable ID. Do not derive endpoint IDs from session names, broker IDs, terminal labels, output, or prose. Registration proves neither provider/model readiness nor task execution.
 - inspect typed creation errors before retrying: `TASK_WORKER_PREFLIGHT_FAILED` precedes creation; `TASK_WORKER_NOT_READY` retains `createdSession` and `cleanup`. An `unconfirmed` cleanup requires exact-ID inspection, not an assumption that the session is gone. Do not silently fall back to ordinary spawn if the installed Wolfpack lacks readiness support; report the capability gap.
 - pass the returned endpoint without translation:

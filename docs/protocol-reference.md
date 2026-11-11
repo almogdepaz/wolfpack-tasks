@@ -88,14 +88,9 @@ Remote task endpoints must be locally resolved aliases. The paired CLI qualifies
 
 ## delegation workflow
 
-Configure `WOLFPACK_IMPLEMENTER_MODEL` and `WOLFPACK_REVIEWER_MODEL`; defaults are `openai-codex/gpt-5.6-terra` and `openai-codex/gpt-5.6-sol`. Explicit user or project choices override those defaults.
+Model selection belongs to `wolfpack-tailnet-control`, not to this protocol. Pass `--model "$WOLFPACK_IMPLEMENTER_MODEL"` or `--model "$WOLFPACK_REVIEWER_MODEL"` when that variable is set; otherwise omit `--model`, so the Pi child uses its configured default model. Explicit user or project choices override both.
 
-```bash
-IMPLEMENTER_MODEL="${WOLFPACK_IMPLEMENTER_MODEL:-openai-codex/gpt-5.6-terra}"
-REVIEWER_MODEL="${WOLFPACK_REVIEWER_MODEL:-openai-codex/gpt-5.6-sol}"
-```
-
-1. Use one assignment mode: full-startup instructions, or an endpoint assignment—not both. For a task worker: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json` (or `"$REVIEWER_MODEL"`). This mode rejects prompts/plans and `--notify-parent`; put all instructions in `agent_task_send.task`.
+1. Use one assignment mode: full-startup instructions, or an endpoint assignment—not both. For a task worker: `wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --task-worker --readiness-timeout-ms 30000 --json`, plus the role `--model` only when one is set. This mode rejects prompts/plans and `--notify-parent`; put all instructions in `agent_task_send.task`.
 2. Verify exact session ID/root/Pi harness and registered `taskEndpoint`. `TASK_WORKER_PREFLIGHT_FAILED` precedes creation. `TASK_WORKER_NOT_READY` retains `createdSession`/`cleanup`; inspect `unconfirmed` cleanup by exact ID before retry. Registration is not model execution.
 3. Submit the assignment and continue useful work. When none remains, yield to structured follow-up. Do not poll `agent_task_status` or `agent_task_inbox` merely to wait; use `agent_task_wait` only when explicitly asked to block.
 4. Use `agent_task_message` for questions, answers and information. The receiver's last action is `agent_task_done`, not completion prose.

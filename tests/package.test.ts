@@ -10,6 +10,8 @@ async function readUsageDocumentation(): Promise<string> {
 	const documents = await Promise.all([readFile(readmePath, "utf8"), readFile(protocolReferencePath, "utf8")]);
 	return documents.join("\n");
 }
+// concrete model IDs belong to user configuration, not to shipped documentation.
+const MODEL_ID_PATTERN = /openai-codex\/|\bgpt-\d|\bclaude-(?:opus|sonnet|haiku|fable)-/i;
 const delegationSkillPath = new URL("../skills/wolfpack-task-delegation/SKILL.md", import.meta.url);
 const retiredDelegationSkillPath = new URL("../skills/wolfpack-pi-task-delegation", import.meta.url);
 const summarySkillPath = new URL("../skills/task-context-summary/SKILL.md", import.meta.url);
@@ -95,7 +97,7 @@ describe("v2-only package", () => {
 		expect(`${readme}\n${skill}`).not.toContain("task-gateway.md");
 	});
 
-	test("documents prompt-free workers, role model defaults and overrides, exact sends, and artifact declarations", async () => {
+	test("documents prompt-free workers, model-free role selection, exact sends, and artifact declarations", async () => {
 		const [readme, skill] = await Promise.all([readUsageDocumentation(), readFile(delegationSkillPath, "utf8")]);
 		const minimalEnvelope = readme.match(/### minimal valid v2 send envelope\n\n```json\n([\s\S]+?)\n```/);
 
@@ -104,7 +106,7 @@ describe("v2-only package", () => {
 			task: "implement the narrow change and run focused tests",
 		}, null, 2));
 		for (const document of [readme, skill]) {
-			expect(document).toContain('wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --model "$IMPLEMENTER_MODEL" --task-worker --readiness-timeout-ms 30000 --json');
+			expect(document).toContain("wolfpack agent spawn --project-dir /absolute/worktree --name <task-role> --task-worker --readiness-timeout-ms 30000 --json");
 			expect(document).toContain("TASK_WORKER_PREFLIGHT_FAILED");
 			expect(document).toContain("TASK_WORKER_NOT_READY");
 			expect(document).toContain("createdSession");
@@ -112,16 +114,16 @@ describe("v2-only package", () => {
 			expect(document).toContain("rejects prompts/plans and `--notify-parent`");
 			expect(document).toContain("WOLFPACK_IMPLEMENTER_MODEL");
 			expect(document).toContain("WOLFPACK_REVIEWER_MODEL");
-			expect(document).toContain("openai-codex/gpt-5.6-terra");
-			expect(document).toContain("openai-codex/gpt-5.6-sol");
+			expect(document).toContain("wolfpack-tailnet-control");
+			expect(document).toContain("otherwise omit `--model`");
+			expect(document).not.toMatch(MODEL_ID_PATTERN);
 			expect(document).toContain("agent_task_send.task");
 			expect(document).toContain('`deliverAs: "followUp"`');
 			expect(document).toContain("result.changedFiles");
 			expect(document).toContain("receiver-project-relative regular files");
 			expect(document).toContain('"artifacts": [{ "path": "verification/task-2.md" }]');
 		}
-		expect(readme).toContain("Explicit user or project choices override those defaults.");
-		expect(skill).toContain("an explicit user or project model choice overrides the environment/default.");
+		expect(skill).toContain("An explicit user or project model choice overrides both.");
 		expect(skill).toContain("do not start a blocking “wait for assignments” prompt");
 		expect(readme).toContain("pre-admission validation rejection creates no task");
 		expect(readme).toContain("idempotency remains necessary");

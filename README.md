@@ -42,12 +42,12 @@ start new pi sessions after installation. wolfpack supplies `WOLFPACK_SESSION_NA
 from a pi parent running under wolfpack:
 
 ```bash
-# choose an available pi model explicitly.
-MODEL="openai-codex/gpt-6.1-sol:medium"
 wolfpack agent spawn --project-dir /absolute/worktree \
-  --name task-implementation --model "$MODEL" \
+  --name task-implementation \
   --task-worker --readiness-timeout-ms 30000 --json
 ```
+
+the worker uses the pi default model from your pi settings. add `--model <provider/id>` only to override it; `wolfpack-tailnet-control` describes the role model variables.
 
 replace `/absolute/worktree` with the directory the worker should use. this starts a prompt-free worker and returns a stable `sessionId` and a registered `taskEndpoint`. registration means the session can receive mail—not that its model has executed anything.
 

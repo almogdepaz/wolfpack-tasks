@@ -201,6 +201,35 @@ test.each([
 	f.wake.close();
 });
 
+/** Suspends the status command until the test releases it, so a turn can start and stop while it is in flight. */
+function suspendedStatus() {
+	let release!: () => void;
+	const checked = new Promise<void>((resolve) => { release = resolve; });
+	const ready = answer(READY);
+	const run: Runner = async (argv) => {
+		if (argv[2] === "status") await checked;
+		return ready(argv);
+	};
+	return { run, release };
+}
+
+test("a turn that starts and stops during the status check still waits for the idle settle before the paste", async () => {
+	const status = suspendedStatus();
+	const f = fixture(READY, status.run);
+	f.wake.requestPointer({ task_id: "t1" });
+	await f.vt.advance(DEFAULT_WAKE_TIMING.channelGraceMs);
+	expect(f.commands).toEqual([STATUS]);
+	f.wake.activity("busy");
+	f.wake.activity("idle");
+	status.release();
+	await f.vt.advance(DEFAULT_WAKE_TIMING.settleMs - 1);
+	expect(f.commands).toEqual([STATUS]);
+	await f.vt.advance(1);
+	// The settled nudge checks the terminal again: the earlier status predates the turn.
+	expect(f.commands).toEqual([STATUS, STATUS, PASTE, SUBMIT]);
+	f.wake.close();
+});
+
 /** Fails the first `failures` status commands with `fail`, then answers like a ready session. */
 function flakyStatus(failures: number, fail: () => Promise<CommandResult>): Runner {
 	const ready = answer(READY);

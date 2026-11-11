@@ -37,7 +37,7 @@ describe("v2-only package", () => {
 			readonly keywords?: readonly string[];
 		};
 		expect(packageJson.name).toBe("@sgtbeatdown/wolfpack-tasks");
-		expect(packageJson.version).toBe("0.3.0");
+		expect(packageJson.version).toBe("0.3.1");
 		expect(packageJson.repository?.url).toBe("https://github.com/almogdepaz/wolfpack-tasks.git");
 		expect(packageJson.keywords).toContain("pi-package");
 		const readme = await readFile(readmePath, "utf8");

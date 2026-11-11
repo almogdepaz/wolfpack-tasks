@@ -100,6 +100,8 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 	const timing = options.timing ?? DEFAULT_WAKE_TIMING;
 	let mode: WakeMode = "channel";
 	let activity: SessionActivity = "idle";
+	/** End of the quiet period after the latest Stop hook; 0 before any turn. */
+	let settledAt = 0;
 	let outstanding: Outstanding | undefined;
 	let cancelTimer: (() => void) | undefined;
 	let closed = false;
@@ -148,6 +150,9 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 			if (reason !== undefined) { statusFailed(pending, reason); return; }
 			// Busy or acknowledged meanwhile: the next Stop hook re-arms the check.
 			if (fenced(pending) !== undefined) return;
+			// A turn started and stopped during the status check: wait for its settle, then re-run the nudge with a fresh status check.
+			const unsettled = settledAt - options.timers.now();
+			if (unsettled > 0) { schedule(unsettled); return; }
 			const at = options.timers.now();
 			pending.nudged = true;
 			pending.nudgedAt = at;
@@ -190,6 +195,7 @@ export function createWakeController(options: WakeControllerOptions): WakeContro
 		activity(state) {
 			activity = state;
 			if (state === "busy") { cancelTimer?.(); cancelTimer = undefined; return; }
+			settledAt = options.timers.now() + timing.settleMs;
 			const pending = outstanding;
 			if (closed || !pending || pending.nudged) return;
 			schedule(Math.max(timing.settleMs, pending.at + grace() - options.timers.now()));

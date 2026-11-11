@@ -1,7 +1,7 @@
 {
   "name": "wolfpack-tasks",
   "displayName": "Wolfpack Tasks",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Memory-only Wolfpack agent task delegation for Claude Code: the same agent_task_* tools as the pi extension, with channel wake.",
   "author": {
     "name": "Almog De Paz"

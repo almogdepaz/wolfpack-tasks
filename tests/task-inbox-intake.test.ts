@@ -93,22 +93,23 @@ test("control facts behind a held visible event are archived and ACKed while Pi 
 		const { taskId } = await origin.createTask({ target: child, task: "finish", timeoutMs: 60_000 });
 		const pi = session();
 		await deliverTaskInbox(pi.pi, worker, pi.context);
+		await origin.submitIntent({ taskId, type: "task.information", payload: { message: "external message held before the echo" } });
 		await worker.submitIntent({ taskId, type: "task.completed", payload: { summary: "done" } });
 		await origin.receive();
 		await origin.acknowledgeParent(taskId);
-		expect((await relay.unacked(child)).length).toBe(2);
+		expect((await relay.unacked(child)).length).toBe(3);
 		pi.state.idle = false; pi.state.queued = true;
 
 		await deliverTaskInbox(pi.pi, worker, pi.context);
-		expect(pi.archived()).toContain(`${taskId}:task.parent_acknowledged`);
+		expect(pi.archived()).toEqual([`${taskId}:task.completed`, `${taskId}:task.parent_acknowledged`]);
 		expect(pi.presented()).toEqual([`${taskId}:task.created`]);
 		const remaining = await relay.unacked(child);
-		expect(remaining.map(delivery => JSON.parse(delivery.envelope.payload).type)).toEqual(["task.completed"]);
+		expect(remaining.map(delivery => JSON.parse(delivery.envelope.payload).type)).toEqual(["task.information"]);
 		expect(BigInt(stores[1]!.getReceiveCursor())).toBeLessThan(BigInt(remaining[0]!.cursor));
 
 		pi.state.idle = true; pi.state.queued = false;
 		await deliverTaskInbox(pi.pi, worker, pi.context);
-		expect(pi.presented()).toEqual([`${taskId}:task.created`, `${taskId}:task.completed`]);
+		expect(pi.presented()).toEqual([`${taskId}:task.created`, `${taskId}:task.information`]);
 		expect(await relay.unacked(child)).toEqual([]);
 	} finally { for (const store of stores) store.close(); }
 });

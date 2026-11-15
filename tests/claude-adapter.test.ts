@@ -42,7 +42,7 @@ async function fixture(options: { worker?: boolean; env?: Record<string, string 
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
-	return { origin, worker, harness, env };
+	return { relay, origin, worker, harness, env };
 }
 
 const pointers = (harness: Harness) => harness.notifications(CLAUDE_PLUGIN.channelMethod);
@@ -126,6 +126,31 @@ test("the inbox stays compact with long task histories and preserves delivered a
 	expect(again.content.map((part) => part.text).join("\n")).toContain("active assignment must remain visible");
 	const status = await harness.callTool("agent_task_status", { taskId: historical[0] });
 	expect(JSON.stringify(status.structuredContent)).toContain("history detail ");
+});
+
+test("a worker completion echo requests no Claude pointer and leaves the worker gate closed", async () => {
+	const { relay, origin, worker, harness } = await fixture({ worker: true });
+	const taskId = await assign(origin, worker, harness, "complete without an echo turn");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	const done = await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
+	expect(done.isError).toBeUndefined();
+	await origin.receive();
+	await harness.hook({ event: "stop" });
+	// Stop starts an asynchronous refresh: wait for archival/ACK or an erroneous pointer, not just intake.
+	await waitFor(async () => pointers(harness).length > 1 || (await relay.receive({ endpoint: worker.endpoint, cursor: "0", limit: 100 })).deliveries.length === 0);
+	expect(worker.getTask(taskId)?.status).toBe("completed");
+	expect(pointers(harness)).toHaveLength(1);
+	const inbox = await harness.callTool("agent_task_inbox");
+	expect(inbox.content.map(part => part.text).join("\n")).not.toContain("## task completed");
+	expect(await harness.hook({ event: "pre_tool", tool_name: "Bash" })).toContain(WORKER_GATE_DENIAL_CODE);
+
+	// External information remains actionable even though the worker has closed its task.
+	await origin.submitIntent({ taskId, type: "task.information", payload: { message: "parent follow-up remains visible" } });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 2);
+	const followUp = await harness.callTool("agent_task_inbox");
+	expect(followUp.content.map(part => part.text).join("\n")).toContain("parent follow-up remains visible");
 });
 
 test("the status file records the wake mode and protocol version", async () => {

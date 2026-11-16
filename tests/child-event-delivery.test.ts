@@ -96,6 +96,41 @@ test("pi: child events become one visible entry and one follow-up wake, and wait
   } finally { await pi.handlers.session_shutdown!({}, pi.context); }
 });
 
+test("pi: repeated interim done notices preserve identity and wake-ups across continuing work", async () => {
+  const r = relay();
+  r.childEvent({ message: "still implementing" });
+  r.childEvent({ state: "idle" });
+  const pi = piParent(r.createCore);
+  try {
+    await pi.handlers.session_start!({}, pi.context);
+    const first = pi.sent[0]!.message;
+    expect(first.content).toContain("event done, state done, runtime settled (not task completion)");
+    expect(first.content).toContain("event done, state idle, runtime settled (not task completion)");
+    expect(first.content).toContain("Task results are separate terminal indications; parent verification is still required.");
+    expect(first.details).toEqual({ childEvents: [
+      { eventId: "child:boot:1", childSessionId: "child-session-1", event: "done" },
+      { eventId: "child:boot:2", childSessionId: "child-session-1", event: "done" },
+    ], dropped: 0 });
+    expect(first.details).not.toHaveProperty("taskId");
+    // A continuing child can settle again; this is not deduplicated as assignment completion.
+    pi.setIdle(false);
+    r.childEvent({ message: "next phase" });
+    await pi.handlers.agent_end!({}, pi.context);
+    expect(pi.sent).toHaveLength(2);
+    pi.setIdle(true);
+    await pi.handlers.agent_end!({}, pi.context);
+    expect(pi.sent).toHaveLength(4);
+    expect(pi.sent[2]!.message.content).toContain("runtime settled (not task completion)");
+    expect(pi.sent[2]!.message.details).toEqual({ childEvents: [
+      { eventId: "child:boot:3", childSessionId: "child-session-1", event: "done" },
+    ], dropped: 0 });
+    expect(pi.sent[3]!.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    expect(r.acks).toEqual(["wolfpack.child_event:child:boot:1", "wolfpack.child_event:child:boot:2", "wolfpack.child_event:child:boot:3"]);
+    await pi.handlers.agent_end!({}, pi.context);
+    expect(pi.sent).toHaveLength(4);
+  } finally { await pi.handlers.session_shutdown!({}, pi.context); }
+});
+
 test("claude: child events request the channel pointer and appear in the agent_task_inbox result", async () => {
   const r = relay();
   r.childEvent({ event: "message", state: "running", message: "phase 1 committed" });
@@ -108,7 +143,7 @@ test("claude: child events request the channel pointer and appear in the agent_t
   await waitFor(() => harness.notifications(CLAUDE_PLUGIN.channelMethod).length === 1);
   const inbox = (await harness.callTool("agent_task_inbox")).content.map(part => part.text).join("\n");
   expect(inbox).toContain("## wolfpack child events (2)");
-  expect(inbox).toContain(`child "worker-b" (session "child-session-1"): event done, state done`);
+  expect(inbox).toContain(`child "worker-b" (session "child-session-1"): event done, state done, runtime settled (not task completion)`);
   expect(inbox).toContain(`message: "phase 1 committed"`);
   expect(r.acks).toHaveLength(2);
   const again = (await harness.callTool("agent_task_inbox")).content.map(part => part.text).join("\n");

@@ -7,7 +7,7 @@ import { taskWorkerModeEnabled, WORKER_GATE_DENIAL_CODE } from "./task-worker-mo
 import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
 import { RELAY_LOSS_CODES, taskErrorClass } from "./task-errors";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
-import { CHILD_EVENTS_CUSTOM_TYPE, CHILD_EVENTS_WAKE_CUSTOM_TYPE, CHILD_EVENTS_WAKE_TEXT, renderChildEvents } from "./child-events";
+import { CHILD_EVENTS_CUSTOM_TYPE, CHILD_EVENTS_RECORD_CUSTOM_TYPE, CHILD_EVENTS_WAKE_CUSTOM_TYPE, CHILD_EVENTS_WAKE_TEXT, renderChildEvents } from "./child-events";
 import type { ChildEventQueue } from "./child-events";
 import { createConfiguredTaskCore } from "./configured-task-core";
 import type { OwnedTaskCore } from "./configured-task-core";
@@ -580,13 +580,16 @@ interface TaskDeliveryEvidence {
 }
 
 /**
- * Reports malformed-event diagnostics, then presents all pending child events as one entry and one follow-up wake.
+ * Archives passive telemetry outside model context, then presents actionable events with one follow-up wake.
  * Like task mail, events wait while the host is busy or holds pending messages; they never steer an active turn.
  * The entry details carry no task id, so task entry evidence ignores them.
  */
 function presentChildEvents(host: AgentTaskHost, context: AgentTaskRuntimeContext, queue: ChildEventQueue | undefined): void {
 	if (!queue) return;
 	for (const diagnostic of queue.takeDiagnostics()) context.ui.notify(diagnostic, "warning");
+	const records = queue.takeRecords();
+	if (records.events.length > 0) host.appendEntry(CHILD_EVENTS_RECORD_CUSTOM_TYPE, records);
+	// Check only actionable work before isIdle(): the Claude host requests a pointer there.
 	if (!queue.hasEvents() || context.hasPendingMessages() || !context.isIdle()) return;
 	const batch = queue.takeEvents();
 	const details = { childEvents: batch.events.map((event) => ({ eventId: event.eventId, childSessionId: event.childSessionId, event: event.event })), dropped: batch.dropped };

@@ -104,11 +104,13 @@ test("pi: repeated interim done notices preserve identity and wake-ups across co
   try {
     await pi.handlers.session_start!({}, pi.context);
     const first = pi.sent[0]!.message;
-    expect(first.content).toContain("event done, state done, runtime settled");
-    expect(first.content).toContain("event done, state idle, runtime settled");
-    expect(first.content).not.toContain("not task completion");
-    expect(first.content).not.toContain("Runtime notices only");
-    expect(first.content).not.toContain("Task results are separate");
+    const child = '- child "worker-a" (session "child-session-1")';
+    expect(first.content.split("\n").slice(0, 4)).toEqual([
+      "## wolfpack child events (2)",
+      `${child}: event done, state done, runtime settled`,
+      `${child}: event done, state idle, runtime settled`,
+      "",
+    ]);
     expect(first.details).toEqual({ childEvents: [
       { eventId: "child:boot:1", childSessionId: "child-session-1", event: "done" },
       { eventId: "child:boot:2", childSessionId: "child-session-1", event: "done" },

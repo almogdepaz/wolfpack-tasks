@@ -33,6 +33,7 @@ const RECEIVED_INTENT_OPERATION = "received_intent";
 const TERMINAL_STATUSES: ReadonlySet<TaskRecord["status"]> = new Set(Object.values(TASK_EVENT_TYPES).flatMap(type => type.status ?? []));
 const TERMINAL_EVENTS = taskEventTypes(type => type.terminal);
 const CONVERSATIONAL_EVENTS = taskEventTypes(type => type.conversational);
+const SELF_ECHO_EVENTS = taskEventTypes(type => type.conversational || (type.terminal && type.intent));
 const CANONICAL_EVENTS = taskEventTypes(() => true);
 const RECEIVER_INTENT_TYPES = taskEventTypes(type => type.intent);
 const IGNORE_OUTBOX_FAILURES: ReadonlySet<string> = new Set();
@@ -88,7 +89,7 @@ export interface TaskCore {
 	hasPendingWork(): boolean;
 	/** Synchronous notification after each committed store change; returns the unsubscribe function. */
 	onChange(listener: () => void): () => void;
-	/** Correlate a receiver conversation with a locally recorded outbound intent, never session history or payload author claims. */
+	/** Historical public name: also classifies receiver terminal echoes. Requires local outbound intent correlation, never task status or payload author claims. */
 	isSelfAuthoredConversation(event: TaskEvent): boolean;
 	/** Offers pending mail with bounded old-work retry; in a phased pass this is the explicit final retry phase. */
 	flushOutbox(signal?: AbortSignal, work?: TaskWorkScope): Promise<void>;
@@ -343,7 +344,7 @@ export function createTaskCore(options: TaskCoreOptions): TaskCore {
 		onChange(listener) { return options.store.onChange(listener); },
 		hasPendingWork() { return options.store.hasPendingOutbox() || options.store.hasActiveTasks(); },
 		isSelfAuthoredConversation(event) {
-			if (!CONVERSATIONAL_EVENTS.has(event.type) || typeof event.payload.intentId !== "string") return false;
+			if (!SELF_ECHO_EVENTS.has(event.type) || typeof event.payload.intentId !== "string") return false;
 			const task = options.store.getTask(event.taskId);
 			if (!task || !sameEndpoint(options.endpoint, task.target) || sameEndpoint(options.endpoint, task.origin)
 				|| !sameEndpoint(event.source, task.origin) || !sameEndpoint(event.target, task.target)) return false;

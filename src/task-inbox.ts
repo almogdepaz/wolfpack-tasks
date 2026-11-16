@@ -122,7 +122,7 @@ async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, 
 	const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 	const eventKey = key(event.taskId, event.eventId);
 	if (!isPresentedToModel(core, event)) {
-		// Archive control facts and confirmed self-authored conversations without model insertion or wake,
+		// Archive control facts and confirmed self-authored echoes without model insertion or wake,
 		// even while Pi is busy. This is evidence only: no task state or delivery queue is reconstructed.
 		if (!taskEntryEvidence(context.sessionManager).recorded.has(eventKey)) pi.appendEntry(TASK_RECORD_CUSTOM_TYPE, { ...eventDetails, event });
 		return true;

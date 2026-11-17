@@ -80,16 +80,23 @@ test("agent_notify_parent sends no parent target unless both parent id and name 
 	expect(local.calls[0]!.headers.has("authorization")).toBe(false);
 });
 
-test("agent_notify_parent accepts at most 500 code points and refuses empty messages", async () => {
+// The server keeps the first 500 UTF-16 code units, so the tool counts the same units and refuses rather than truncates.
+test("agent_notify_parent accepts at most 500 UTF-16 code units, refuses longer messages locally, and refuses empty messages", async () => {
 	const local = server(() => Response.json({ ok: true }));
 	const harness = await child(parentEnv(), local.fetcher);
-	expect((await harness.callTool(TOOL, { message: "🐺".repeat(500) })).isError).toBeUndefined();
-	const tooLong = await harness.callTool(TOOL, { message: "x".repeat(501) });
-	expect(tooLong.isError).toBe(true);
-	expect(tooLong.content[0]?.text).toContain("500");
+	expect((await harness.callTool(TOOL, { message: "x".repeat(500) })).isError).toBeUndefined();
+	expect((await harness.callTool(TOOL, { message: "🐺".repeat(250) })).isError).toBeUndefined();
+	for (const message of ["x".repeat(518), "x".repeat(528), "🐺".repeat(251)]) {
+		const tooLong = await harness.callTool(TOOL, { message });
+		expect(tooLong.isError).toBe(true);
+		expect(tooLong.content[0]?.text).toContain("not sent");
+		expect(tooLong.content[0]?.text).toContain("500 UTF-16 code units");
+		expect(tooLong.content[0]?.text).toContain(`received ${message.length}`);
+	}
 	expect((await harness.callTool(TOOL, { message: "" })).isError).toBe(true);
 	expect((await harness.callTool(TOOL, {})).isError).toBe(true);
-	expect(local.calls).toHaveLength(1);
+	expect(local.calls).toHaveLength(2);
+	expect(local.calls.map((call) => (call.body as { message: string }).message)).toEqual(["x".repeat(500), "🐺".repeat(250)]);
 });
 
 test("agent_notify_parent reports an unreachable server and a server refusal as errors", async () => {

@@ -147,8 +147,11 @@ describe("v2-only package", () => {
 			expect(document).toContain("Generic role-orchestration guidance applies only to non-worker coordinators.");
 		}
 		expect(readme).toContain("Endpoint assignments require terminal completion and one `agent_task_ack`");
-		expect(readme).toContain("full-startup children have no task ID");
-		expect(skill).toContain("Full-startup children have no endpoint task ID");
+		// Delegated work always uses task IDs; startup prompts are manual-only and never a fallback (plan 042).
+		expect(readme).toContain("a missing terminal ends at the origin deadline as `timed_out`");
+		expect(readme).not.toContain("full-startup children have no task ID");
+		expect(skill).toContain("never fall back to a startup prompt for delegated work");
+		expect(skill).not.toContain("Full-startup children have no endpoint task ID");
 		for (const detail of [
 			"one persistent implementer and one persistent read-only reviewer",
 			"Do not rotate a healthy role session for routine corrections",

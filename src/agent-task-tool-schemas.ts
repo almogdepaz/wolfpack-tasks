@@ -19,6 +19,19 @@ export const SendParams = Type.Object({
 	timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TASK_TIMEOUT_MS, maximum: MAX_TASK_TIMEOUT_MS })),
 });
 export const TaskIdParams = Type.Object({ taskId: Type.String({ minLength: 1 }) });
+export const STATUS_MESSAGE_PAGE_DEFAULT = 5;
+export const STATUS_MESSAGE_PAGE_MAX = 20;
+/**
+ * A status message page stops before this many UTF-16 units of rendered text. It is a target, not a cap: a page always
+ * holds at least one complete message, so one message larger than this (the protocol payload limit allows it) is
+ * returned whole on its own page.
+ */
+export const STATUS_MESSAGE_PAGE_MAX_UNITS = 32_768;
+export const StatusParams = Type.Object({
+	taskId: Type.String({ minLength: 1 }),
+	messagesAfter: Type.Optional(Type.String({ minLength: 1, description: "origin only: page task messages after this message event ID (exclusive); pass the previous page's nextAfter" })),
+	messageLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: STATUS_MESSAGE_PAGE_MAX, description: `origin only: page up to this many complete task messages (default ${STATUS_MESSAGE_PAGE_DEFAULT}); a page also stops before ${STATUS_MESSAGE_PAGE_MAX_UNITS} UTF-16 units, except that a single larger message is returned whole on its own page` })),
+});
 export const WaitParams = Type.Object({ taskId: Type.String({ minLength: 1 }), timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TASK_TIMEOUT_MS, maximum: MAX_TASK_TIMEOUT_MS })) });
 export const InboxParams = Type.Object({});
 export const MessageParams = Type.Object({ taskId: Type.String({ minLength: 1 }), type: stringEnum(["question", "answer", "information"] as const), message: Type.String({ minLength: 1, maxLength: 16 * 1024 }) });

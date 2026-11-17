@@ -66,11 +66,11 @@ test.each([false, true])("queued parent intake canonicalizes completion behind h
 		await parent.connect(); await child.connect();
 		const created = await parent.createTask({ target: receiver, task: "complete behind queued follow-ups", timeoutMs: 60_000 });
 		await child.receive();
-		await child.submitIntent({ taskId: created.taskId, type: "task.information", payload: { message: "earlier visible progress" } });
-		const progress = await parent.receive();
-		expect(progress.map(item => item.kind)).toEqual(["local"]); // Canonical progress is queued locally, never echoed through the relay.
-		const held = progress[0]?.kind === "local" ? progress[0].event : undefined;
-		if (held === undefined) throw new Error("expected held canonical progress");
+		await child.submitIntent({ taskId: created.taskId, type: "task.question", payload: { message: "earlier visible question" } });
+		const question = await parent.receive();
+		expect(question.map(item => item.kind)).toEqual(["local"]); // The canonical question is queued locally, never echoed through the relay.
+		const held = question[0]?.kind === "local" ? question[0].event : undefined;
+		if (held === undefined) throw new Error("expected held canonical question");
 		const cursorBefore = parentStore.getReceiveCursor();
 		await child.submitIntent({ taskId: created.taskId, type: "task.completed", payload: { summary: "finished", result: { verified: true } } });
 		const before = await relay.receive({ endpoint: origin, cursor: cursorBefore, limit: 100 });
@@ -481,11 +481,13 @@ test("origin acknowledges raw receiver intents and renders their canonical messa
 	]);
 	expect(parent.getTask(created.taskId)?.events.slice(-2).map((event) => event.type)).toEqual(["task.information", "task.completed"]);
 	expect(parentStore.getReceiveCursor()).toBe("4"); // One collapsed receipt instead of four.
-	// Canonical events are queued locally while the raw intents are acknowledged, so the same refresh renders them.
+	// Canonical events are queued locally while the raw intents are acknowledged, so the same refresh handles them:
+	// worker progress is archived for inspection, and the completion is rendered.
 	expect(parentEntries).toEqual(expect.arrayContaining([
-		expect.objectContaining({ type: "custom_message", content: expect.stringContaining("progress") }),
+		expect.objectContaining({ type: "custom", customType: "pi-tasks-event-record", data: expect.objectContaining({ event: expect.objectContaining({ type: "task.information" }) }) }),
 		expect.objectContaining({ type: "custom_message", content: expect.stringContaining("finished") }),
 	]));
+	expect(parentEntries).not.toContainEqual(expect.objectContaining({ type: "custom_message", content: expect.stringContaining("progress") }));
 	const rendered = parentEntries.length;
 
 	await deliverTaskInbox(parentPi, parent, parentContext);
@@ -580,11 +582,48 @@ test("origin acknowledges raw receiver intents and renders their canonical messa
 	await deliverTaskInbox(parentPi, parent, parentContext);
 
 	expect(parentEntries).toEqual(expect.arrayContaining([
-		expect.objectContaining({ type: "custom_message", content: expect.stringContaining("progress") }),
+		expect.objectContaining({ type: "custom", customType: "pi-tasks-event-record", data: expect.objectContaining({ event: expect.objectContaining({ type: "task.information" }) }) }),
 		expect.objectContaining({ type: "custom_message", content: expect.stringContaining("finished") }),
 	]));
-	expect(parentEntries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-event")).toHaveLength(2);
-	expect(parentEntries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-wake")).toHaveLength(2);
+	expect(parentEntries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-event")).toHaveLength(1);
+	expect(parentEntries.filter((entry) => typeof entry === "object" && entry !== null && "customType" in entry && entry.customType === "pi-tasks-wake")).toHaveLength(1);
+});
+
+test("origin archives worker progress for inspection but presents and wakes for a worker question, and the answer wakes the worker", async () => {
+	const relay = createInMemoryTaskRelay("memory");
+	const parentStore = createTaskStore(), childStore = createTaskStore();
+	const parent = createTaskCore({ endpoint: origin, relay, store: parentStore, ids: ids("parent") });
+	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, ids: ids("child") });
+	const parentEntries: any[] = [], childEntries: any[] = [];
+	const pi = (entries: any[]) => ({
+		sendMessage(message: any) { entries.push({ type: "custom_message", ...message }); },
+		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+	});
+	const context = (entries: any[]) => ({ isIdle: (): boolean => true, hasPendingMessages: (): boolean => false, sessionManager: { getEntries: (): readonly unknown[] => entries } });
+	const customTypes = (entries: any[]) => entries.map(entry => entry.customType);
+	try {
+		await parent.connect(); await child.connect();
+		const created = await parent.createTask({ target: receiver, task: "implement", timeoutMs: 60_000 });
+		await deliverTaskInbox(pi(childEntries), child, context(childEntries));
+		await child.submitIntent({ taskId: created.taskId, type: "task.information", payload: { message: "phase 1 halfway" } });
+		await deliverTaskInbox(pi(parentEntries), parent, context(parentEntries));
+		await deliverTaskInbox(pi(parentEntries), parent, context(parentEntries));
+		// Progress is a durable, deduplicated archive record and stays in task status; no insertion and no wake.
+		expect(customTypes(parentEntries).filter(type => type !== "pi-tasks-relay-cursor")).toEqual(["pi-tasks-event-record"]);
+		expect(parentEntries[0].data.event).toMatchObject({ type: "task.information", payload: expect.objectContaining({ message: "phase 1 halfway" }) });
+		expect(parent.getTask(created.taskId)?.events.map(event => event.type)).toContain("task.information");
+
+		await child.submitIntent({ taskId: created.taskId, type: "task.question", payload: { message: "may I widen scope?" } });
+		await deliverTaskInbox(pi(parentEntries), parent, context(parentEntries));
+		expect(customTypes(parentEntries).filter(type => type === "pi-tasks-event" || type === "pi-tasks-wake")).toEqual(["pi-tasks-event", "pi-tasks-wake"]);
+		expect(parentEntries.find(entry => entry.customType === "pi-tasks-event").content).toContain("may I widen scope?");
+
+		await parent.submitIntent({ taskId: created.taskId, type: "task.answer", payload: { message: "yes" } });
+		const answer = parent.getTask(created.taskId)?.events.at(-1);
+		await deliverTaskInbox(pi(childEntries), child, context(childEntries));
+		expect(childEntries.filter(entry => entry.customType === "pi-tasks-event" && entry.details.eventId === answer?.eventId)).toHaveLength(1);
+		expect(childEntries.filter(entry => entry.customType === "pi-tasks-wake" && entry.details.eventId === answer?.eventId)).toHaveLength(1);
+	} finally { parentStore.close(); childStore.close(); }
 });
 
 test("recovers the next assignment after terminal completion, parent acknowledgement, and receiver core replacement", async () => {

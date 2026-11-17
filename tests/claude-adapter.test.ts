@@ -124,8 +124,11 @@ test("the inbox stays compact with long task histories and preserves delivered a
 	]);
 	const again = await harness.callTool("agent_task_inbox");
 	expect(again.content.map((part) => part.text).join("\n")).toContain("active assignment must remain visible");
+	// Status omits the event history too; the receiver reads its task messages in task mail.
 	const status = await harness.callTool("agent_task_status", { taskId: historical[0] });
-	expect(JSON.stringify(status.structuredContent)).toContain("history detail ");
+	expect(JSON.stringify(status)).not.toContain("history detail ");
+	expect(status.structuredContent).toMatchObject({ taskId: historical[0], status: "completed", messageCount: 8, terminal: { type: "task.completed" } });
+	expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThan(4_096);
 });
 
 test("a worker completion echo requests no Claude pointer and leaves the worker gate closed", async () => {
@@ -151,6 +154,43 @@ test("a worker completion echo requests no Claude pointer and leaves the worker 
 	await waitFor(() => pointers(harness).length === 2);
 	const followUp = await harness.callTool("agent_task_inbox");
 	expect(followUp.content.map(part => part.text).join("\n")).toContain("parent follow-up remains visible");
+});
+
+test("an origin archives worker progress without a Claude pointer and requests one for a worker question", async () => {
+	const relay = claudePathRelay();
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const worker = createTaskCore({ endpoint: { relay: "memory", id: "worker" }, relay, store: createTaskStore(), ids: sequence("worker") });
+	await origin.connect(); await worker.connect();
+	const harness = startHarness({ env: wolfpackEnv(), core: origin, runCommand: noCommands });
+	harnesses.push(harness);
+	await harness.initialize("2025-11-25");
+	await harness.notify("notifications/initialized");
+	const { taskId } = await origin.createTask({ target: worker.endpoint, task: "assigned work", timeoutMs: 60_000 });
+	await worker.receive();
+
+	await worker.submitIntent({ taskId, type: "task.information", payload: { message: "worker progress stays archived" } });
+	await harness.hook({ event: "stop" });
+	// Wait for archival/ACK or an erroneous pointer, not just intake.
+	await waitFor(async () => pointers(harness).length > 0 || (await relay.receive({ endpoint: origin.endpoint, cursor: "0", limit: 100 })).deliveries.length === 0);
+	expect(pointers(harness)).toHaveLength(0);
+	const quiet = await harness.callTool("agent_task_inbox");
+	expect(quiet.content.map(part => part.text).join("\n")).not.toContain("worker progress stays archived");
+	// Progress is read explicitly through a status message page. The text is shared with Pi, whose model reads only
+	// tool content, so the message text goes there once and the structured page carries metadata only.
+	const status = await harness.callTool("agent_task_status", { taskId });
+	expect(JSON.stringify(status)).not.toContain("worker progress stays archived");
+	expect(status.content.map(part => part.text).join("\n")).toContain("- messages: 1");
+	const page = await harness.callTool("agent_task_status", { taskId, messageLimit: 5 });
+	expect(page.content.map(part => part.text).join("\n")).toContain("worker progress stays archived");
+	expect(JSON.stringify(page.structuredContent)).not.toContain("worker progress stays archived");
+
+	await worker.submitIntent({ taskId, type: "task.question", payload: { message: "which branch should I use?" } });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 1);
+	expect((pointers(harness)[0] as { params: { meta: Record<string, unknown> } }).params.meta.task_id).toBe(taskId);
+	const asked = (await harness.callTool("agent_task_inbox")).content.map(part => part.text).join("\n");
+	expect(asked).toContain("which branch should I use?");
+	expect(asked).not.toContain("worker progress stays archived");
 });
 
 test("the status file records the wake mode and protocol version", async () => {

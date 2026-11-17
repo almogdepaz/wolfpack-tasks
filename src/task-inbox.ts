@@ -2,7 +2,7 @@ import type { TaskCore } from "./task-core";
 import { createTaskWorkScope } from "./task-work-scope";
 import type { TaskShipment, TaskWorkScope } from "./task-work-scope";
 import { TASK_EVENT_TYPES, TaskDeliveryEvidenceState, TaskDeliveryStage, TaskEnvelopeKind, TaskOutboxDeliveryError, TaskProtocolError, isBlockedOutboxDeliveryCode } from "./task-protocol";
-import type { RelayDelivery, TaskEvent } from "./task-protocol";
+import type { RelayDelivery, TaskEvent, TaskSnapshot } from "./task-protocol";
 
 const TASK_EVENT_CUSTOM_TYPE = "pi-tasks-event";
 const TASK_WAKE_CUSTOM_TYPE = "pi-tasks-wake";
@@ -198,13 +198,25 @@ function inboxEvent(delivery: RelayDelivery): TaskEvent {
 function isPresentedToModel(core: TaskCore, event: TaskEvent): boolean {
 	const type = TASK_EVENT_TYPES[event.type];
 	if (type === undefined) throw new TaskProtocolError("UNKNOWN_EVENT", `unknown task inbox event type: ${event.type}`);
-	return type.visible && !core.isSelfAuthoredConversation(event);
+	return type.visible && !core.isSelfAuthoredConversation(event) && !isOriginProgress(core, event);
+}
+
+/**
+ * Worker progress at the origin is inspection-only (task status and the archive record): only a question,
+ * a terminal outcome or a timeout needs the parent model. An unknown task fails open to presentation.
+ */
+function isOriginProgress(core: TaskCore, event: TaskEvent): boolean {
+	return event.type === "task.information" && isLocalOrigin(core, core.getTask(event.taskId));
+}
+
+function isLocalOrigin(core: TaskCore, task: TaskSnapshot | undefined): task is TaskSnapshot {
+	return task !== undefined && task.origin.relay === core.endpoint.relay && task.origin.id === core.endpoint.id;
 }
 
 function hasAcknowledgedLocalOriginTerminal(core: TaskCore, event: TaskEvent): boolean {
 	if (TASK_EVENT_TYPES[event.type]?.terminal !== true) return false;
 	const task = core.getTask(event.taskId);
-	if (task === undefined || task.origin.relay !== core.endpoint.relay || task.origin.id !== core.endpoint.id) return false;
+	if (!isLocalOrigin(core, task)) return false;
 	const terminalIndex = task.events.findIndex((candidate) => candidate.eventId === event.eventId && candidate.type === event.type);
 	return terminalIndex >= 0 && task.events.slice(terminalIndex + 1).some((candidate) => candidate.type === "task.parent_acknowledged");
 }

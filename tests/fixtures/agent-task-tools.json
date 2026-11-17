@@ -60,7 +60,7 @@
     },
     "agent_task_status": {
       "label": "Task Status",
-      "description": "Read local endpoint-owned task state; status is unavailable while its origin is offline.",
+      "description": "Read local endpoint-owned task state without its event history; status is unavailable while its origin is offline. The task origin pages its task messages (worker progress, questions, answers) in order with messageLimit and messagesAfter: complete messages only, at most 20 per page and fewer when a page would exceed 32768 UTF-16 units; a single larger message is returned whole on its own page.",
       "parameters": {
         "type": "object",
         "required": [
@@ -70,6 +70,17 @@
           "taskId": {
             "type": "string",
             "minLength": 1
+          },
+          "messagesAfter": {
+            "type": "string",
+            "minLength": 1,
+            "description": "origin only: page task messages after this message event ID (exclusive); pass the previous page's nextAfter"
+          },
+          "messageLimit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "origin only: page up to this many complete task messages (default 5); a page also stops before 32768 UTF-16 units, except that a single larger message is returned whole on its own page"
           }
         }
       }

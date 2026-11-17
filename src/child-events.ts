@@ -134,9 +134,11 @@ export function createChildEventQueue(): ChildEventQueue & { accept(intake: Chil
 				else suppressed++;
 				return;
 			}
-			// Runtime settlement is not task completion. Explicit host teardown needs no model response;
-			// spontaneous exits (even code 0) remain actionable because work may be unfinished.
-			if (intake.event.event === "done" || (intake.event.event === "exited" && intake.event.reason === "killed")) {
+			// Runtime settlement is not task completion, and a runtime input request (permission prompt, needs_input) is
+			// not a task question: tracked work reports through task mail, and the human gets Wolfpack's input push.
+			// Explicit host teardown needs no model response; spontaneous exits (even code 0) remain actionable
+			// because work may be unfinished, and `error` remains actionable as a failure state.
+			if (intake.event.event === "done" || intake.event.event === "blocked" || (intake.event.event === "exited" && intake.event.reason === "killed")) {
 				records.push(intake.event);
 				if (records.length > LIMITS.PENDING) { records.shift(); droppedRecords++; }
 				return;

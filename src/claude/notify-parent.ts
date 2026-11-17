@@ -11,14 +11,17 @@ import { validateToolArguments } from "./validation";
  * task authority and does not change task state.
  */
 export const NOTIFY_PARENT_TOOL = "agent_notify_parent";
-/** The server keeps the first 500 characters; the tool refuses longer messages instead of truncating them silently. */
-export const NOTIFY_PARENT_MESSAGE_CODE_POINTS = 500;
+/**
+ * The server keeps the first 500 UTF-16 code units (`message.slice(0, 500)`); the tool counts the same units and refuses
+ * longer messages without a request, with the `wolfpack agent notify-parent` diagnostic, instead of letting them be truncated.
+ */
+export const NOTIFY_PARENT_MESSAGE_UTF16_UNITS = 500;
 const NOTIFY_PATH = "/api/notify";
 const NOTIFY_TIMEOUT_MS = 10_000;
 const ERROR_BODY_CODE_POINTS = 500;
 
 const parameters = Type.Object({
-	message: Type.String({ minLength: 1, description: `Report for the parent session, at most ${NOTIFY_PARENT_MESSAGE_CODE_POINTS} characters.` }),
+	message: Type.String({ minLength: 1, description: `Report for the parent session, at most ${NOTIFY_PARENT_MESSAGE_UTF16_UNITS} UTF-16 code units.` }),
 }, { additionalProperties: false });
 
 export const NOTIFY_PARENT_LISTING = {
@@ -49,7 +52,7 @@ export async function notifyParent(args: unknown, options: {
 }): Promise<NotifyParentResult> {
 	let message: string;
 	try { ({ message } = validateToolArguments(NOTIFY_PARENT_TOOL, parameters, args ?? {}) as { message: string }); } catch (error) { return failure(error instanceof Error ? error.message : String(error)); }
-	if ([...message].length > NOTIFY_PARENT_MESSAGE_CODE_POINTS) return failure(`message must contain at most ${NOTIFY_PARENT_MESSAGE_CODE_POINTS} characters`);
+	if (message.length > NOTIFY_PARENT_MESSAGE_UTF16_UNITS) return failure(`notification not sent: message exceeds ${NOTIFY_PARENT_MESSAGE_UTF16_UNITS} UTF-16 code units (received ${message.length}); shorten it and try again.`);
 	const { environment } = options;
 	const url = `http://127.0.0.1:${environment.port}${NOTIFY_PATH}`;
 	// The `wolfpack agent notify-parent` body: the parent target only when both id and name are known.

@@ -1,7 +1,7 @@
 import type { Static, TSchema } from "typebox";
 
 import { abortableSleep } from "./abortable-sleep";
-import { DoneParams, InboxParams, MessageParams, SendParams, TaskIdParams, WaitParams } from "./agent-task-tool-schemas";
+import { DoneParams, InboxParams, MessageParams, SendParams, STATUS_MESSAGE_PAGE_DEFAULT, STATUS_MESSAGE_PAGE_MAX, STATUS_MESSAGE_PAGE_MAX_UNITS, StatusParams, TaskIdParams, WaitParams } from "./agent-task-tool-schemas";
 import { createTaskWorkScope } from "./task-work-scope";
 import { taskWorkerModeEnabled, WORKER_GATE_DENIAL_CODE } from "./task-worker-mode";
 import { deliverTaskInbox, taskEntryEvidence, type TaskEntryEvidence } from "./task-inbox";
@@ -12,7 +12,7 @@ import type { ChildEventQueue } from "./child-events";
 import { createConfiguredTaskCore } from "./configured-task-core";
 import type { OwnedTaskCore } from "./configured-task-core";
 import type { SubmitIntentInput, SubmitIntentOutcome, TaskCore } from "./task-core";
-import type { TaskEndpoint, TaskSnapshot } from "./task-protocol";
+import type { TaskEndpoint, TaskEvent, TaskSnapshot } from "./task-protocol";
 
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1_000;
 /** Background cadence while work is pending (active task, pending outbox, or a worker awaiting assignment). */
@@ -458,14 +458,23 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 		},
 	}));
 	tools.push(defineTool({
-		name: "agent_task_status", label: "Task Status", description: "Read local endpoint-owned task state; status is unavailable while its origin is offline.", parameters: TaskIdParams,
+		name: "agent_task_status", label: "Task Status",
+		description: `Read local endpoint-owned task state without its event history; status is unavailable while its origin is offline. The task origin pages its task messages (worker progress, questions, answers) in order with messageLimit and messagesAfter: complete messages only, at most ${STATUS_MESSAGE_PAGE_MAX} per page and fewer when a page would exceed ${STATUS_MESSAGE_PAGE_MAX_UNITS} UTF-16 units; a single larger message is returned whole on its own page.`,
+		parameters: StatusParams,
 		async execute(_id, params, signal, _onUpdate, context) {
 			try {
 				const activeCore = await configuredCore(signal);
 				const task = activeCore.getTask(params.taskId);
 				if (!task) return taskError(new TaskProtocolError("UNKNOWN_TASK", `unknown task: ${params.taskId}`, { retryable: false }));
+				const isOrigin = sameEndpoint(task.origin, activeCore.endpoint);
+				const paging = params.messagesAfter !== undefined || params.messageLimit !== undefined;
+				if (paging && !isOrigin) return taskError(new TaskProtocolError("TASK_MESSAGES_ORIGIN_ONLY", `task messages are paged by the task origin; the receiver reads them in task mail: ${task.taskId}`, { retryable: false }));
+				const page = paging ? messagePage(task, params.messagesAfter, params.messageLimit ?? STATUS_MESSAGE_PAGE_DEFAULT) : undefined;
 				const deliveryEvidence = taskDeliveryEvidence(task);
-				return toolResult({ ...task, deliveryEvidence }, `## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task, context)}${deliveryEvidenceText(deliveryEvidence)}`);
+				const details = statusDetails(task);
+				const countText = isOrigin && details.messageCount > 0 ? `\n- messages: ${details.messageCount} (page with messageLimit and messagesAfter)` : "";
+				return toolResult({ ...details, deliveryEvidence, ...(page && { messages: page.details }) },
+					`## task status\n- task: \`${task.taskId}\`\n- status: ${task.status}${receiverAssignment(activeCore, task, context)}${deliveryEvidenceText(deliveryEvidence)}${countText}${page?.text ?? ""}`);
 			} catch (error) { return taskError(error); }
 		},
 	}));
@@ -705,6 +714,52 @@ function receiverAssignment(core: TaskCore, task: TaskSnapshot, context: Pick<Ag
 	const incorporated = taskEntryEvidence(context.sessionManager).incorporated.get(task.taskId);
 	if (!task.events.some((event) => ASSIGNMENT_EVENTS.has(event.type) && sameEndpoint(event.target, core.endpoint) && incorporated?.has(event.eventId) === true)) return "";
 	return `\n\n## task assignment\n${task.task}`;
+}
+
+/** Status details: lifecycle and delivery fields plus the canonical terminal event, never the event history. */
+function statusDetails(task: TaskSnapshot) {
+	const { events, ...record } = task;
+	const terminalEvent = events.find((event) => TASK_EVENT_TYPES[event.type]?.terminal === true && event.type === `task.${task.status}`);
+	return { ...record, messageCount: events.filter(isTaskMessage).length, ...(terminalEvent && { terminal: terminalEvent }) };
+}
+
+function isTaskMessage(event: TaskEvent): boolean {
+	return TASK_EVENT_TYPES[event.type]?.conversational === true;
+}
+
+/**
+ * One page of task messages in event order, after an exclusive cursor. The origin archives worker progress without a
+ * wake, so this is how its model reads progress: Pi passes only tool content to the model, so message text goes in the
+ * text and the structured page carries metadata only. A page holds complete messages, at least one when any remain.
+ */
+function messagePage(task: TaskSnapshot, after: string | undefined, limit: number) {
+	const messages = task.events.filter(isTaskMessage);
+	const start = after === undefined ? 0 : messages.findIndex((event) => event.eventId === after) + 1;
+	if (start === 0 && after !== undefined) throw new TaskProtocolError("UNKNOWN_MESSAGE_CURSOR", `unknown message cursor for task ${task.taskId}: ${after}`, { retryable: false });
+	const items: TaskEvent[] = [], lines: string[] = [];
+	let units = 0;
+	for (const event of messages.slice(start, start + limit)) {
+		const message = typeof event.payload.message === "string" ? event.payload.message : "";
+		const line = `- \`${event.eventId}\` ${event.type.slice("task.".length)} from \`${event.source.relay}/${event.source.id}\`: ${message}`;
+		if (items.length > 0 && units + line.length > STATUS_MESSAGE_PAGE_MAX_UNITS) break;
+		units += line.length;
+		items.push(event); lines.push(line);
+	}
+	const remaining = messages.length - start - items.length;
+	const nextAfter = remaining > 0 ? items.at(-1)?.eventId : undefined;
+	const position = after === undefined ? "from the start" : `after \`${after}\``;
+	const text = items.length === 0
+		? `\n\n## task messages\n- no messages ${position}`
+		: `\n\n## task messages (${items.length} ${position}; ${remaining} remaining)\n${lines.join("\n")}${nextAfter ? `\n- next page: messagesAfter \`${nextAfter}\`` : ""}`;
+	return {
+		text,
+		details: {
+			...(after !== undefined && { after }),
+			items: items.map((event) => ({ eventId: event.eventId, type: event.type, source: event.source, occurredAt: event.occurredAt })),
+			remaining,
+			...(nextAfter !== undefined && { nextAfter }),
+		},
+	};
 }
 
 /** Session evidence is memoized; tasks are read fresh on every call so the gate follows current task state. */

@@ -225,7 +225,7 @@ test("the worker gate denies other tools through the PreToolUse hook until an as
 });
 
 /** A worker whose first core fails `connect` on demand; the rebind returns a fresh endpoint, after `rebind` settles. */
-async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
+async function relayLossFixture(options: { rebind?: Promise<unknown>; active?: boolean } = {}) {
 	process.env.WOLFPACK_TASK_WORKER = "1";
 	const relay = claudePathRelay();
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
@@ -254,10 +254,13 @@ async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
-	const { taskId: lost } = await origin.createTask({ target: worker.endpoint, task: "assignment before the reset", timeoutMs: 60_000 });
-	await harness.hook({ event: "stop" });
-	await waitFor(() => pointers(harness).length === 1);
-	expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
+	const assignment = options.active === false ? undefined : await origin.createTask({ target: worker.endpoint, task: "assignment before the reset", timeoutMs: 60_000 });
+	const lost = assignment?.taskId;
+	if (assignment) {
+		await harness.hook({ event: "stop" });
+		await waitFor(() => pointers(harness).length === 1);
+		expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
+	}
 	return {
 		origin, fresh, harness, lost, env,
 		factoryCalls: () => factoryCalls,
@@ -266,14 +269,35 @@ async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
 		async reset() {
 			connectionError = "RELAY_RESET";
 			await harness.hook({ event: "stop" });
-			await waitFor(async () => (await harness.hook({ event: "pre_tool", tool_name: "Bash" })).includes("RELAY_STATE_LOST") && factoryCalls === 2);
+			await waitFor(async () => {
+				const verdict = await harness.hook({ event: "pre_tool", tool_name: "Bash" });
+				return factoryCalls === 2 && (options.active === false || verdict.includes("RELAY_STATE_LOST"));
+			});
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		},
 	};
 }
 
+test("idle Claude relay loss binds a fresh endpoint without replay, task failure, or a parent wake", async () => {
+	const { harness, origin, fresh, reset, factoryCalls } = await relayLossFixture({ active: false });
+	await reset();
+	expect(factoryCalls()).toBe(2);
+	expect(pointers(harness)).toHaveLength(0);
+	expect(fresh.listTasks()).toEqual([]);
+	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(inbox).toContain("No active tasks required local failure records.");
+	expect(inbox).not.toContain("task failed locally");
+	const { taskId } = await origin.createTask({ target: fresh.endpoint, task: "explicit new assignment", timeoutMs: 60_000 });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 1);
+	const next = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(next).toContain(taskId);
+	expect(next).toContain("explicit new assignment");
+});
+
 test("a relay-loss note waits for the next inbox result and requests no pointer", async () => {
 	const { harness, lost, reset } = await relayLossFixture();
+	if (!lost) throw new Error("fixture assignment missing");
 	await reset();
 	expect(pointers(harness)).toHaveLength(1);
 	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
@@ -283,6 +307,7 @@ test("a relay-loss note waits for the next inbox result and requests no pointer"
 
 test("a buffered relay-loss note does not suppress the wake for a later assignment", async () => {
 	const { origin, fresh, harness, lost, reset } = await relayLossFixture();
+	if (!lost) throw new Error("fixture assignment missing");
 	await reset();
 	const { taskId: next } = await origin.createTask({ target: fresh.endpoint, task: "assignment after the reset", timeoutMs: 60_000 });
 	await harness.hook({ event: "stop" });

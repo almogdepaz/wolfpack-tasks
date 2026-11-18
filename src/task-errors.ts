@@ -60,6 +60,8 @@ export const TASK_ERRORS: Readonly<Record<string, TaskErrorSpec>> = {
 	TASK_NOT_TERMINAL: { class: "state", retryable: false, message: "only a terminal task may be acknowledged" },
 	TERMINAL_INTENT_CONFLICT: { class: "state", retryable: false, message: "a different terminal intent was already submitted" },
 	NOT_ORIGIN: { class: "state", retryable: false, message: "only the origin may perform this operation" },
+	TASK_MESSAGES_ORIGIN_ONLY: { class: "state", retryable: false, message: "only the task origin pages task messages" },
+	UNKNOWN_MESSAGE_CURSOR: { class: "state", retryable: false, message: "message cursor is not a message of this task" },
 	NOT_PARTICIPANT: { class: "state", retryable: false, message: "endpoint is not a task participant" },
 	REASSIGNMENT_REFUSED: { class: "state", retryable: false, message: "task cannot be reassigned" },
 	TASK_ERROR: { class: "state", retryable: true, message: "task operation failed" },

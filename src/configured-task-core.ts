@@ -40,7 +40,7 @@ export async function createConfiguredTaskCore(options: ConfiguredTaskCoreOption
     const core = await (options.rebind ? session.rebind(signal) : session.connect(signal));
     const active = new Set<Promise<unknown>>();
     let closed = false, closing: Promise<void> | undefined;
-    const owned = { ...core, childEvents: { hasEvents: childEvents.hasEvents, takeEvents: childEvents.takeEvents, takeDiagnostics: childEvents.takeDiagnostics } } as OwnedTaskCore;
+    const owned = { ...core, childEvents: { hasEvents: childEvents.hasEvents, takeEvents: childEvents.takeEvents, takeRecords: childEvents.takeRecords, takeDiagnostics: childEvents.takeDiagnostics } } as OwnedTaskCore;
     const track = <T>(result: Promise<T>): Promise<T> => {
       active.add(result);
       void result.then(() => active.delete(result), () => active.delete(result));

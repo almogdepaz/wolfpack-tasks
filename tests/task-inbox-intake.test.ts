@@ -68,18 +68,18 @@ test("intents beyond the first page are canonicalized and ACKed while a visible 
 		const own = await p.createTask({ target: child, task: "parent work", timeoutMs: 60_000 });
 		await c.receive();
 		const held = await q.createTask({ target: parent, task: "assignment for parent", timeoutMs: 60_000 });
-		for (const message of ["one", "two", "three"]) await c.submitIntent({ taskId: own.taskId, type: "task.information", payload: { message } });
+		for (const message of ["one", "two", "three"]) await c.submitIntent({ taskId: own.taskId, type: "task.question", payload: { message } });
 		const pi = session(); pi.state.idle = false;
 
 		await deliverTaskInbox(pi.pi, p, pi.context);
-		expect(p.getTask(own.taskId)!.events.filter(event => event.type === "task.information").map(event => event.payload.message)).toEqual(["one", "two", "three"]);
+		expect(p.getTask(own.taskId)!.events.filter(event => event.type === "task.question").map(event => event.payload.message)).toEqual(["one", "two", "three"]);
 		expect((await relay.unacked(parent)).map(delivery => delivery.envelope.taskId)).toEqual([held.taskId]);
 		expect(pi.presented()).toEqual([]);
 		expect(stores[0]!.getReceiveCursor()).toBe("0");
 
 		pi.state.idle = true;
 		await deliverTaskInbox(pi.pi, p, pi.context);
-		expect(pi.presented()).toEqual([`${held.taskId}:task.created`, ...Array(3).fill(`${own.taskId}:task.information`)]);
+		expect(pi.presented()).toEqual([`${held.taskId}:task.created`, ...Array(3).fill(`${own.taskId}:task.question`)]);
 		expect(await relay.unacked(parent)).toEqual([]);
 	} finally { for (const store of stores) store.close(); }
 });
@@ -93,22 +93,23 @@ test("control facts behind a held visible event are archived and ACKed while Pi 
 		const { taskId } = await origin.createTask({ target: child, task: "finish", timeoutMs: 60_000 });
 		const pi = session();
 		await deliverTaskInbox(pi.pi, worker, pi.context);
+		await origin.submitIntent({ taskId, type: "task.information", payload: { message: "external message held before the echo" } });
 		await worker.submitIntent({ taskId, type: "task.completed", payload: { summary: "done" } });
 		await origin.receive();
 		await origin.acknowledgeParent(taskId);
-		expect((await relay.unacked(child)).length).toBe(2);
+		expect((await relay.unacked(child)).length).toBe(3);
 		pi.state.idle = false; pi.state.queued = true;
 
 		await deliverTaskInbox(pi.pi, worker, pi.context);
-		expect(pi.archived()).toContain(`${taskId}:task.parent_acknowledged`);
+		expect(pi.archived()).toEqual([`${taskId}:task.completed`, `${taskId}:task.parent_acknowledged`]);
 		expect(pi.presented()).toEqual([`${taskId}:task.created`]);
 		const remaining = await relay.unacked(child);
-		expect(remaining.map(delivery => JSON.parse(delivery.envelope.payload).type)).toEqual(["task.completed"]);
+		expect(remaining.map(delivery => JSON.parse(delivery.envelope.payload).type)).toEqual(["task.information"]);
 		expect(BigInt(stores[1]!.getReceiveCursor())).toBeLessThan(BigInt(remaining[0]!.cursor));
 
 		pi.state.idle = true; pi.state.queued = false;
 		await deliverTaskInbox(pi.pi, worker, pi.context);
-		expect(pi.presented()).toEqual([`${taskId}:task.created`, `${taskId}:task.completed`]);
+		expect(pi.presented()).toEqual([`${taskId}:task.created`, `${taskId}:task.information`]);
 		expect(await relay.unacked(child)).toEqual([]);
 	} finally { for (const store of stores) store.close(); }
 });

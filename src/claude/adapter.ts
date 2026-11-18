@@ -335,7 +335,7 @@ function listing(runtime: AgentTaskRuntime, active: boolean, notify: boolean): M
 
 function mcpResult(result: AgentTaskToolResult, delivered: readonly string[], inbox = false): McpToolResult {
 	const details = isRecord(result.details) ? result.details : { value: result.details };
-	// Inbox summaries must not duplicate full event histories; agent_task_status still returns the full record.
+	// Inbox summaries must not duplicate full event histories; agent_task_status details omit the history too.
 	const structured = inbox && Array.isArray(details.tasks)
 		? { ...details, tasks: details.tasks.map((task) => isRecord(task) ? { taskId: task.taskId, status: task.status } : task) }
 		: details;

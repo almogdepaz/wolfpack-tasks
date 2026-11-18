@@ -48,7 +48,7 @@ async function fixture() {
   await core.connect(); await child.connect();
   const old = await core.createTask({ target: peer, task: "outgoing assignment", timeoutMs: 60_000 });
   await child.receive();
-  await child.submitIntent({ taskId: old.taskId, type: "task.information", payload: { message: "original raw update" } });
+  await child.submitIntent({ taskId: old.taskId, type: "task.question", payload: { message: "original raw update" } });
   await expect(core.receive()).rejects.toMatchObject({ code: "RELAY_UNAVAILABLE" });
   const requested = store.requestedRelayAcknowledgements(origin);
   const originals = store.outbox("accepted").filter(row => row.envelope.kind === "canonical_event").map(row => row.envelope);
@@ -56,7 +56,7 @@ async function fixture() {
   expect(requested).toHaveLength(1); expect(originals).toHaveLength(1);
   const originalAck = attempts[0]!;
   // This intent has NOT been canonicalized yet. Staging only the old replay is insufficient.
-  await child.submitIntent({ taskId: old.taskId, type: "task.information", payload: { message: "new raw update" } });
+  await child.submitIntent({ taskId: old.taskId, type: "task.question", payload: { message: "new raw update" } });
   const fresh = await child.createTask({ target: origin, task: "fresh assignment in the same page", timeoutMs: 60_000 });
   const before = pages.length;
   const pending = () => store.requestedRelayAcknowledgements(origin, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER).map(cursor => ({ cursor, envelopeId: store.pendingRelayEnvelopeId(origin, cursor), retryAt: store.relayAcknowledgementRetryAt!(origin, cursor) }));

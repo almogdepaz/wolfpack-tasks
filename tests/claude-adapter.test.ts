@@ -42,7 +42,7 @@ async function fixture(options: { worker?: boolean; env?: Record<string, string 
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
-	return { origin, worker, harness, env };
+	return { relay, origin, worker, harness, env };
 }
 
 const pointers = (harness: Harness) => harness.notifications(CLAUDE_PLUGIN.channelMethod);
@@ -124,8 +124,73 @@ test("the inbox stays compact with long task histories and preserves delivered a
 	]);
 	const again = await harness.callTool("agent_task_inbox");
 	expect(again.content.map((part) => part.text).join("\n")).toContain("active assignment must remain visible");
+	// Status omits the event history too; the receiver reads its task messages in task mail.
 	const status = await harness.callTool("agent_task_status", { taskId: historical[0] });
-	expect(JSON.stringify(status.structuredContent)).toContain("history detail ");
+	expect(JSON.stringify(status)).not.toContain("history detail ");
+	expect(status.structuredContent).toMatchObject({ taskId: historical[0], status: "completed", messageCount: 8, terminal: { type: "task.completed" } });
+	expect(Buffer.byteLength(JSON.stringify(status))).toBeLessThan(4_096);
+});
+
+test("a worker completion echo requests no Claude pointer and leaves the worker gate closed", async () => {
+	const { relay, origin, worker, harness } = await fixture({ worker: true });
+	const taskId = await assign(origin, worker, harness, "complete without an echo turn");
+	await waitFor(() => pointers(harness).length === 1);
+	await harness.callTool("agent_task_inbox");
+	const done = await harness.callTool("agent_task_done", { taskId, status: "completed", summary: "done" });
+	expect(done.isError).toBeUndefined();
+	await origin.receive();
+	await harness.hook({ event: "stop" });
+	// Stop starts an asynchronous refresh: wait for archival/ACK or an erroneous pointer, not just intake.
+	await waitFor(async () => pointers(harness).length > 1 || (await relay.receive({ endpoint: worker.endpoint, cursor: "0", limit: 100 })).deliveries.length === 0);
+	expect(worker.getTask(taskId)?.status).toBe("completed");
+	expect(pointers(harness)).toHaveLength(1);
+	const inbox = await harness.callTool("agent_task_inbox");
+	expect(inbox.content.map(part => part.text).join("\n")).not.toContain("## task completed");
+	expect(await harness.hook({ event: "pre_tool", tool_name: "Bash" })).toContain(WORKER_GATE_DENIAL_CODE);
+
+	// External information remains actionable even though the worker has closed its task.
+	await origin.submitIntent({ taskId, type: "task.information", payload: { message: "parent follow-up remains visible" } });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 2);
+	const followUp = await harness.callTool("agent_task_inbox");
+	expect(followUp.content.map(part => part.text).join("\n")).toContain("parent follow-up remains visible");
+});
+
+test("an origin archives worker progress without a Claude pointer and requests one for a worker question", async () => {
+	const relay = claudePathRelay();
+	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
+	const worker = createTaskCore({ endpoint: { relay: "memory", id: "worker" }, relay, store: createTaskStore(), ids: sequence("worker") });
+	await origin.connect(); await worker.connect();
+	const harness = startHarness({ env: wolfpackEnv(), core: origin, runCommand: noCommands });
+	harnesses.push(harness);
+	await harness.initialize("2025-11-25");
+	await harness.notify("notifications/initialized");
+	const { taskId } = await origin.createTask({ target: worker.endpoint, task: "assigned work", timeoutMs: 60_000 });
+	await worker.receive();
+
+	await worker.submitIntent({ taskId, type: "task.information", payload: { message: "worker progress stays archived" } });
+	await harness.hook({ event: "stop" });
+	// Wait for archival/ACK or an erroneous pointer, not just intake.
+	await waitFor(async () => pointers(harness).length > 0 || (await relay.receive({ endpoint: origin.endpoint, cursor: "0", limit: 100 })).deliveries.length === 0);
+	expect(pointers(harness)).toHaveLength(0);
+	const quiet = await harness.callTool("agent_task_inbox");
+	expect(quiet.content.map(part => part.text).join("\n")).not.toContain("worker progress stays archived");
+	// Progress is read explicitly through a status message page. The text is shared with Pi, whose model reads only
+	// tool content, so the message text goes there once and the structured page carries metadata only.
+	const status = await harness.callTool("agent_task_status", { taskId });
+	expect(JSON.stringify(status)).not.toContain("worker progress stays archived");
+	expect(status.content.map(part => part.text).join("\n")).toContain("- messages: 1");
+	const page = await harness.callTool("agent_task_status", { taskId, messageLimit: 5 });
+	expect(page.content.map(part => part.text).join("\n")).toContain("worker progress stays archived");
+	expect(JSON.stringify(page.structuredContent)).not.toContain("worker progress stays archived");
+
+	await worker.submitIntent({ taskId, type: "task.question", payload: { message: "which branch should I use?" } });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 1);
+	expect((pointers(harness)[0] as { params: { meta: Record<string, unknown> } }).params.meta.task_id).toBe(taskId);
+	const asked = (await harness.callTool("agent_task_inbox")).content.map(part => part.text).join("\n");
+	expect(asked).toContain("which branch should I use?");
+	expect(asked).not.toContain("worker progress stays archived");
 });
 
 test("the status file records the wake mode and protocol version", async () => {
@@ -160,7 +225,7 @@ test("the worker gate denies other tools through the PreToolUse hook until an as
 });
 
 /** A worker whose first core fails `connect` on demand; the rebind returns a fresh endpoint, after `rebind` settles. */
-async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
+async function relayLossFixture(options: { rebind?: Promise<unknown>; active?: boolean } = {}) {
 	process.env.WOLFPACK_TASK_WORKER = "1";
 	const relay = claudePathRelay();
 	const origin = createTaskCore({ endpoint: { relay: "memory", id: "parent" }, relay, store: createTaskStore(), ids: sequence("parent") });
@@ -189,10 +254,13 @@ async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
 	harnesses.push(harness);
 	await harness.initialize("2025-11-25");
 	await harness.notify("notifications/initialized");
-	const { taskId: lost } = await origin.createTask({ target: worker.endpoint, task: "assignment before the reset", timeoutMs: 60_000 });
-	await harness.hook({ event: "stop" });
-	await waitFor(() => pointers(harness).length === 1);
-	expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
+	const assignment = options.active === false ? undefined : await origin.createTask({ target: worker.endpoint, task: "assignment before the reset", timeoutMs: 60_000 });
+	const lost = assignment?.taskId;
+	if (assignment) {
+		await harness.hook({ event: "stop" });
+		await waitFor(() => pointers(harness).length === 1);
+		expect((await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n")).toContain("assignment before the reset");
+	}
 	return {
 		origin, fresh, harness, lost, env,
 		factoryCalls: () => factoryCalls,
@@ -201,14 +269,35 @@ async function relayLossFixture(options: { rebind?: Promise<unknown> } = {}) {
 		async reset() {
 			connectionError = "RELAY_RESET";
 			await harness.hook({ event: "stop" });
-			await waitFor(async () => (await harness.hook({ event: "pre_tool", tool_name: "Bash" })).includes("RELAY_STATE_LOST") && factoryCalls === 2);
+			await waitFor(async () => {
+				const verdict = await harness.hook({ event: "pre_tool", tool_name: "Bash" });
+				return factoryCalls === 2 && (options.active === false || verdict.includes("RELAY_STATE_LOST"));
+			});
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		},
 	};
 }
 
+test("idle Claude relay loss binds a fresh endpoint without replay, task failure, or a parent wake", async () => {
+	const { harness, origin, fresh, reset, factoryCalls } = await relayLossFixture({ active: false });
+	await reset();
+	expect(factoryCalls()).toBe(2);
+	expect(pointers(harness)).toHaveLength(0);
+	expect(fresh.listTasks()).toEqual([]);
+	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(inbox).toContain("No active tasks required local failure records.");
+	expect(inbox).not.toContain("task failed locally");
+	const { taskId } = await origin.createTask({ target: fresh.endpoint, task: "explicit new assignment", timeoutMs: 60_000 });
+	await harness.hook({ event: "stop" });
+	await waitFor(() => pointers(harness).length === 1);
+	const next = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
+	expect(next).toContain(taskId);
+	expect(next).toContain("explicit new assignment");
+});
+
 test("a relay-loss note waits for the next inbox result and requests no pointer", async () => {
 	const { harness, lost, reset } = await relayLossFixture();
+	if (!lost) throw new Error("fixture assignment missing");
 	await reset();
 	expect(pointers(harness)).toHaveLength(1);
 	const inbox = (await harness.callTool("agent_task_inbox")).content.map((part) => part.text).join("\n");
@@ -218,6 +307,7 @@ test("a relay-loss note waits for the next inbox result and requests no pointer"
 
 test("a buffered relay-loss note does not suppress the wake for a later assignment", async () => {
 	const { origin, fresh, harness, lost, reset } = await relayLossFixture();
+	if (!lost) throw new Error("fixture assignment missing");
 	await reset();
 	const { taskId: next } = await origin.createTask({ target: fresh.endpoint, task: "assignment after the reset", timeoutMs: 60_000 });
 	await harness.hook({ event: "stop" });

@@ -985,7 +985,7 @@ test("contains agent_end relay failures and leaves the unavailable warning", asy
 	}
 });
 
-test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically replaces a relay-loss lifetime and records active tasks as locally lost: %s", async (relayLossCode) => {
+for (const hasActiveTask of [true, false]) test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)(`automatically replaces a relay-loss lifetime and records only active tasks as locally lost (active=${hasActiveTask}): %s`, async (relayLossCode) => {
 	let sessionStart: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
 	let agentSettled: ((event: unknown, context: unknown) => Promise<unknown>) | undefined;
 	let sessionShutdown: (() => Promise<void>) | undefined;
@@ -1017,10 +1017,10 @@ test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically repl
 		async shipRequired() {},
 		async repairAcknowledgements() {},
 		async receive(): Promise<readonly []> { oldReceives += 1; return []; },
-		listTasks: () => [
+		listTasks: () => hasActiveTask ? [
 			{ taskId: "active-task", status: "active" },
 			{ taskId: "completed-task", status: "completed" },
-		],
+		] : [],
 		close(): Promise<void> { if (!oldClosing) { oldCloses += 1; oldClosing = Promise.resolve(); } return oldClosing; },
 		hasPendingWork: () => true,
 	} as unknown as TaskCore & { close(): Promise<void> };
@@ -1072,7 +1072,7 @@ test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically repl
 		expect(oldEvaluations).toBe(relayLossCode === "RELAY_RESET" ? 1 : 2);
 		expect(oldReceives).toBe(relayLossCode === "RELAY_RESET" ? 1 : 2);
 		expect(oldCloses).toBe(1);
-		expect(messages).toEqual([{
+		expect(messages).toEqual(hasActiveTask ? [{
 			message: {
 				customType: "pi-tasks-relay-loss",
 				content: expect.stringContaining("## task failed locally\ntask: `active-task`\n\nRelay state was lost; the remote outcome is unknown."),
@@ -1080,14 +1080,14 @@ test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically repl
 				details: { taskId: "active-task", status: "failed", error: { code: "RELAY_STATE_LOST", message: "relay state was lost; remote outcome is unknown", retryable: false }, remoteOutcome: "unknown" },
 			},
 			options: { triggerTurn: false },
-		}]);
+		}] : []);
 		expect(notifications).toEqual([]);
 		expect(statuses.at(-1)).toBe("tasks: relay unavailable");
 
 		await agentSettled!({}, context);
 		expect(factoryModes).toEqual([false, true, false]);
-		expect(messages).toHaveLength(1);
-		expect(notifications).toEqual([{ message: "Relay state was lost; automatically bound a fresh endpoint. 1 active task was marked locally failed with unknown remote outcome.", level: "warning" }]);
+		expect(messages).toHaveLength(hasActiveTask ? 1 : 0);
+		expect(notifications).toEqual([{ message: "Relay state was lost; automatically bound a fresh endpoint. " + (hasActiveTask ? "1 active task was marked locally failed with unknown remote outcome." : "No active tasks required local failure records."), level: "warning" }]);
 		expect(statuses.at(-1)).toBeUndefined();
 		const historical = await tools.agent_task_status!.execute("status", { taskId: "active-task" }, new AbortController().signal, undefined, context);
 		expect((historical.details as { readonly error: { readonly code: string } }).error.code).toBe("UNKNOWN_TASK");
@@ -1099,7 +1099,7 @@ test.each(["RELAY_RESET", "RELAY_REBIND_REQUIRED"] as const)("automatically repl
 		freshConnectionError = new TaskProtocolError("RELAY_AUTH_REQUIRED", "authentication required", { retryable: false });
 		await agentSettled!({}, context);
 		expect(factoryModes).toEqual([false, true, false]);
-		expect(messages).toHaveLength(1);
+		expect(messages).toHaveLength(hasActiveTask ? 1 : 0);
 		expect(notifications).toHaveLength(1);
 		expect(statuses.at(-1)).toBe("tasks: Wolfpack authentication required");
 	} finally {

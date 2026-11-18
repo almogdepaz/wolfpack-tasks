@@ -8,6 +8,8 @@ import { createTaskStore } from "../src/task-store";
 const origin = { relay: "memory", id: "origin" };
 const receiver = { relay: "memory", id: "receiver" };
 const conversationTypes: Array<"task.information" | "task.question" | "task.answer"> = ["task.information", "task.question", "task.answer"];
+// Receiver-authored information is worker progress: inspection-only at the origin.
+const originActionableTypes = conversationTypes.filter(type => type !== "task.information");
 function ids(prefix: string) { let next = 0; return () => `${prefix}-${++next}`; }
 function relayCursor(item: TaskInboxItem | undefined): string { if (item?.kind !== "relay") throw new Error("expected a relay item"); return item.delivery.cursor; }
 function presentation() {
@@ -38,7 +40,24 @@ function conversation(core: ReturnType<typeof createTaskCore>, taskId: string, t
 	return event;
 }
 
-test.each(conversationTypes)("archives receiver-authored %s without a self wake, preserving origin insertion and wake", async type => {
+test("archives receiver-authored task.information at both ends: origin progress record and receiver self-echo", async () => {
+	const f = await fixture(), parent = presentation(), child = presentation();
+	await f.child.submitIntent({ taskId: f.taskId, type: "task.information", payload: { message: "phase 1 halfway" } });
+	await deliverTaskInbox(parent.pi, f.parent, parent.context);
+	const event = conversation(f.parent, f.taskId, "task.information");
+	expect(parent.messages).toEqual([]);
+	expect(parent.records).toContainEqual({ customType: "pi-tasks-event-record", data: { taskId: f.taskId, eventId: event.eventId, event } });
+	await deliverTaskInbox(child.pi, f.child, child.context);
+	expect(child.messages).toEqual([]);
+	expect(child.records).toContainEqual({ customType: "pi-tasks-event-record", data: { taskId: f.taskId, eventId: event.eventId, event } });
+	await deliverTaskInbox(parent.pi, f.parent, parent.context);
+	expect(parent.messages).toEqual([]);
+	expect(parent.records.filter(record => record.customType === "pi-tasks-event-record")).toHaveLength(1);
+	expect(f.parent.getTask(f.taskId)?.events).toContainEqual(event); // Still inspectable through task status.
+	f.parentStore.close(); f.childStore.close();
+});
+
+test.each(originActionableTypes)("archives receiver-authored %s without a self wake, preserving origin insertion and wake", async type => {
 	const f = await fixture(), parent = presentation(), child = presentation();
 	await f.child.submitIntent({ taskId: f.taskId, type, payload: { message: "same prose in either direction" } });
 	await deliverTaskInbox(parent.pi, f.parent, parent.context); // Canonicalize the raw intent and present it locally in the same refresh.
@@ -69,7 +88,12 @@ test.each(conversationTypes)("origin-authored %s remains actionable at receiver 
 	await deliverTaskInbox(child.pi, f.child, child.context);
 	expect(child.messages.map(message => [message.customType, message.details.eventId])).toEqual([["pi-tasks-event", peerEvent.eventId], ["pi-tasks-wake", peerEvent.eventId]]);
 	await deliverTaskInbox(parent.pi, f.parent, parent.context);
-	expect(parent.messages.map(message => message.details.eventId)).toEqual([selfEvent.eventId, selfEvent.eventId]);
+	if (type === "task.information") {
+		expect(parent.messages).toEqual([]);
+		expect(parent.records).toContainEqual({ customType: "pi-tasks-event-record", data: { taskId: f.taskId, eventId: selfEvent.eventId, event: selfEvent } });
+	} else {
+		expect(parent.messages.map(message => message.details.eventId)).toEqual([selfEvent.eventId, selfEvent.eventId]);
+	}
 	f.parentStore.close(); f.childStore.close();
 });
 

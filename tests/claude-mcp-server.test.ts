@@ -6,6 +6,7 @@ import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/task-core";
 import { createTaskStore } from "../src/task-store";
 import contract from "./fixtures/agent-task-tools.json";
+import packageJson from "../package.json";
 import { sequence, startHarness, wolfpackEnv } from "./claude-harness";
 
 const forbiddenCore = async (): Promise<never> => { throw new Error("no-op mode must not create a task core"); };
@@ -35,12 +36,13 @@ describe("initialize", () => {
 	test("declares tools, the claude channel capability and pointer instructions", async () => {
 		const harness = readyHarness();
 		const response = await harness.initialize();
-		const result = (response as { result: { capabilities: Record<string, unknown>; instructions: string; serverInfo: { name: string } } }).result;
+		const result = (response as { result: { capabilities: Record<string, unknown>; instructions: string; serverInfo: { name: string; version: string } } }).result;
 		expect(result.capabilities.tools).toEqual({});
 		expect(result.capabilities.experimental).toEqual({ "claude/channel": {} });
 		expect(result.instructions).toContain('<channel source="');
 		expect(result.instructions).toContain("agent_task_inbox");
 		expect(result.serverInfo.name).toBe(CLAUDE_PLUGIN.serverName);
+		expect(result.serverInfo.version).toBe(packageJson.version);
 	});
 });
 

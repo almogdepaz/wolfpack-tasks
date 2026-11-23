@@ -4,13 +4,13 @@ import { createInMemoryTaskRelay } from "../src/in-memory-task-relay";
 import { createTaskCore } from "../src/index";
 import type { TaskCore } from "../src/index";
 import { deliverTaskInbox } from "../src/task-inbox";
-import { TASK_PROTOCOL_VERSION } from "../src/task-protocol";
+import { TASK_PROTOCOL_VERSION, TaskProtocolError } from "../src/task-protocol";
 import { createTaskStore } from "../src/task-store";
 
 const origin = { relay: "memory", id: "origin" };
 const receiver = { relay: "memory", id: "receiver" };
 
-function presentation() {
+function presentation(taskWorker = false) {
 	const entries: any[] = [];
 	return {
 		entries,
@@ -18,13 +18,13 @@ function presentation() {
 			sendMessage(message: unknown) { entries.push({ type: "custom_message", ...message as object }); },
 			appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
 		},
-		context: { isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getEntries: () => entries } },
+		context: { taskWorker, isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getEntries: () => entries } },
 		messages: () => entries.filter(entry => entry.type === "custom_message"),
 		records: () => entries.filter(entry => entry.customType === "pi-tasks-event-record"),
 	};
 }
 
-async function fixture() {
+async function fixture(taskWorker = false) {
 	const relay = createInMemoryTaskRelay("memory");
 	const parentStore = createTaskStore(), childStore = createTaskStore();
 	let now = 1_000;
@@ -33,7 +33,7 @@ async function fixture() {
 	const child = createTaskCore({ endpoint: receiver, relay, store: childStore, clock });
 	await parent.connect(); await child.connect();
 	const { taskId } = await parent.createTask({ target: receiver, task: "terminal echo regression", timeoutMs: 60_000 });
-	const worker = presentation(), coordinator = presentation();
+	const worker = presentation(taskWorker), coordinator = presentation();
 	await deliverTaskInbox(worker.pi, child, worker.context);
 	await deliverTaskInbox(coordinator.pi, parent, coordinator.context);
 	worker.entries.length = 0;
@@ -115,7 +115,7 @@ test.each([
 	["task.cancelled", "cancelled"],
 	["task.timed_out", "timed_out"],
 ] as const)("delivers external %s and information even after a local terminal intent", async (type, status) => {
-	const { parent, child, taskId, worker, expire } = await fixture();
+	const { parent, child, taskId, worker, expire } = await fixture(true);
 	await child.submitIntent({ taskId, type: "task.completed", payload: { summary: "local completion not yet canonicalized" } });
 	// The origin wins the terminal race before receiving the worker intent.
 	if (type === "task.timed_out") { expire(); await parent.evaluateTimeouts(); }
@@ -126,6 +126,44 @@ test.each([
 	expect(worker.messages().filter(entry => entry.customType === "pi-tasks-event").map(entry => entry.details.event.type)).toEqual([type, "task.information"]);
 	expect(worker.messages().filter(entry => entry.customType === "pi-tasks-wake")).toHaveLength(2);
 	expect(child.getTask(taskId)!.status).toBe(status);
+});
+
+test.each([false, true])("archives queued worker mail after accepted terminal delivery (canonical echo available: %s)", async echoAvailable => {
+	const { parent, child, taskId, worker } = await fixture(true);
+	for (const type of ["task.answer", "task.information"] as const) {
+		await parent.submitIntent({ taskId, type, payload: { message: "parent input" } });
+	}
+	await deliverTaskInbox(worker.pi, child, { ...worker.context, isIdle: () => false });
+	await child.submitIntent({ taskId, type: "task.completed", payload: { summary: "finished" } });
+	expect(child.getTask(taskId)!.terminalDelivery.state).toBe("accepted");
+	if (echoAvailable) await parent.receive();
+	const next = await parent.createTask({ target: receiver, task: "follow-up", timeoutMs: 60_000 });
+	await deliverTaskInbox(worker.pi, child, worker.context);
+	const mail = parent.getTask(taskId)!.events.filter(e => e.type === "task.answer" || e.type === "task.information");
+	expect(worker.records().map(entry => entry.data.event).filter(e => e.type === "task.answer" || e.type === "task.information")).toEqual(mail);
+	expect(worker.messages().map(entry => [entry.customType, entry.details.taskId])).toEqual([
+		["pi-tasks-event", next.taskId], ["pi-tasks-wake", next.taskId],
+	]);
+});
+
+test.each([true, false])("keeps a queued answer actionable when terminal submission fails (retryable: %s)", async retryable => {
+	const { parent, child, taskId, relay, worker } = await fixture(true);
+	await parent.submitIntent({ taskId, type: "task.answer", payload: { message: "parent decision" } });
+	const send = spyOn(relay, "send").mockRejectedValueOnce(new TaskProtocolError("TARGET_NOT_REGISTERED", "test refusal", { retryable }));
+	try {
+		await expect(child.submitIntent({ taskId, type: "task.completed", payload: { summary: "done" } })).rejects.toMatchObject({ retryable });
+	} finally { send.mockRestore(); }
+	expect(child.getTask(taskId)!.terminalDelivery.state).toBe(retryable ? "pending" : "delivery_blocked");
+	await deliverTaskInbox(worker.pi, child, worker.context);
+	expect(worker.messages().map(entry => entry.customType)).toEqual(["pi-tasks-event", "pi-tasks-wake"]);
+});
+
+test("an ordinary receiver still sees parent input after sending its terminal intent", async () => {
+	const { parent, child, taskId, worker } = await fixture();
+	await parent.submitIntent({ taskId, type: "task.answer", payload: { message: "parent decision" } });
+	await child.submitIntent({ taskId, type: "task.completed", payload: { summary: "done" } });
+	await deliverTaskInbox(worker.pi, child, worker.context);
+	expect(worker.messages().map(entry => entry.customType)).toEqual(["pi-tasks-event", "pi-tasks-wake"]);
 });
 
 test.each(["missing", "unknown", "other-task", "other-type"])("does not suppress terminal payload claims with %s local intent correlation", async mismatch => {

@@ -247,6 +247,7 @@ export function createAgentTaskRuntime(host: AgentTaskHost, core: TaskCore | und
 				sendMessage(message, options) { if (isCurrent()) host.sendMessage(message, options); },
 				appendEntry(customType, data) { if (isCurrent()) host.appendEntry(customType, data); },
 			}, guardedCore, {
+				taskWorker: workerGateEnabled,
 				isIdle: (): boolean => isCurrent() && context.isIdle(),
 				hasPendingMessages: (): boolean => !isCurrent() || context.hasPendingMessages(),
 				sessionManager: context.sessionManager,

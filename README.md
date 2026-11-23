@@ -72,7 +72,7 @@ replace `to` with the actual returned `{ relay, id }`. put the complete assignme
 
 ### 4. receive and verify the result
 
-continue useful work after sending. when none remains, yield the turn: structured follow-ups bring questions and results back to the parent. do not repeatedly poll just to wait.
+continue useful work after sending. when none remains, yield the turn: structured follow-ups bring questions and results back to the parent. do not repeatedly poll just to wait. a worker with a blocking question should finish only independent work, then yield until it reads the answer for that task. do not submit a terminal result that depends on an unanswered question.
 
 | tool | purpose |
 | --- | --- |
@@ -101,11 +101,11 @@ child events are not tasks. they have no task ID, need no `agent_task_ack`, and 
 
 task results remain separate terminal indications, and parent verification is still required. delegated work reports only through its task: worker questions and `agent_task_done`. runtime `done`, `blocked`, and manual notify-parent reports are not task outcomes. an `agent_task_done` refused at argument validation or preflight records nothing: the task stays active with `terminalDelivery: not_submitted`; correct it and call again. once the intent is recorded, a same-status retry reuses that identity. a missing terminal ends at the origin deadline as `timed_out`. event IDs and task acknowledgment semantics stay unchanged.
 
-at the task origin, worker `task.information` (progress) is inspection-only: Pi archives it as a `pi-tasks-event-record`, and the origin reads it on demand with `agent_task_status` message pages (`messageLimit`, `messagesAfter`). it creates no follow-up or channel pointer. worker questions, terminal outcomes, and timeouts still wake the parent; origin information and answers still wake the worker.
+at the task origin, worker `task.information` (progress) is inspection-only: Pi archives it as a `pi-tasks-event-record`, and the origin reads it on demand with `agent_task_status` message pages (`messageLimit`, `messagesAfter`). it creates no follow-up or channel pointer. worker questions, terminal outcomes, and timeouts still wake the parent; origin information and answers wake the active worker. once the relay accepts that worker’s terminal intent, earlier queued answers and information for that task are archived without a wake. this does not confirm the canonical outcome. messages sequenced after a canonical terminal remain visible.
 
 a relay reset or rebind, or a harness restart, loses child events that were received but not yet shown. the server keeps its own record: `wolfpack agent inbox --json`.
 
-a manual or interactive claude code child reports to its parent with the `agent_notify_parent` tool, which replaces `wolfpack agent notify-parent` for claude sessions. task workers report through `agent_task_message` and `agent_task_done` instead.
+a manual or interactive claude code child reports to its parent with the `agent_notify_parent` tool, which replaces `wolfpack agent notify-parent` for claude sessions. before relying on an interactive child for an unattended report, verify that the child can discover `mcp__plugin_wolfpack-tasks_tasks__agent_notify_parent` in the intended project. if not, agree on a manual check-in. task workers report through `agent_task_message` and `agent_task_done` instead.
 
 ### across machines
 

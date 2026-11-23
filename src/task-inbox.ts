@@ -10,6 +10,7 @@ const TASK_CURSOR_CUSTOM_TYPE = "pi-tasks-relay-cursor";
 const TASK_RECORD_CUSTOM_TYPE = "pi-tasks-event-record";
 
 interface InboxContext {
+	readonly taskWorker?: boolean;
 	readonly isIdle: () => boolean;
 	readonly hasPendingMessages: () => boolean;
 	readonly sessionManager: { readonly getEntries: () => readonly unknown[] };
@@ -62,8 +63,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 			let held = false;
 			for (const item of items) {
 				if (item.kind === "local") {
-					if (held && isPresentedToModel(core, item.event)) continue;
-					if (!await presentEvent(pi, core, context, item.event, undefined)) { held = true; continue; }
+					if (!await presentEvent(pi, core, context, item.event, undefined, held)) { held = true; continue; }
 					core.completeLocalPresentation(item.event.eventId);
 					continue;
 				}
@@ -72,8 +72,7 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
 				const mark = work.shipments.length;
 				if (delivery.envelope.kind !== TaskEnvelopeKind.intent) {
 					const event = inboxEvent(delivery);
-					if (held && isPresentedToModel(core, event)) continue;
-					if (!await presentEvent(pi, core, context, event, receipts)) { held = true; continue; }
+					if (!await presentEvent(pi, core, context, event, receipts, held)) { held = true; continue; }
 				}
 				presented.push({ cursor: delivery.cursor, shipments: work.shipments.slice(mark) });
 			}
@@ -118,16 +117,16 @@ export async function deliverTaskInbox(pi: InboxPi, core: TaskCore, context: Inb
  * Receipts collapse to the highest stage reached in this refresh (the origin derives the stages it implies),
  * plus `pi_insertion` blocked when insertion was not observed.
  */
-async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, event: TaskEvent, receipts: RelayReceipts | undefined): Promise<boolean> {
+async function presentEvent(pi: InboxPi, core: TaskCore, context: InboxContext, event: TaskEvent, receipts: RelayReceipts | undefined, held: boolean): Promise<boolean> {
 	const eventDetails = { taskId: event.taskId, eventId: event.eventId };
 	const eventKey = key(event.taskId, event.eventId);
-	if (!isPresentedToModel(core, event)) {
-		// Archive control facts and confirmed self-authored echoes without model insertion or wake,
+	if (!isPresentedToModel(core, event, context.taskWorker === true)) {
+		// Archive inspection-only events without model insertion or wake,
 		// even while Pi is busy. This is evidence only: no task state or delivery queue is reconstructed.
 		if (!taskEntryEvidence(context.sessionManager).recorded.has(eventKey)) pi.appendEntry(TASK_RECORD_CUSTOM_TYPE, { ...eventDetails, event });
 		return true;
 	}
-	if (context.hasPendingMessages()) return false;
+	if (held || context.hasPendingMessages()) return false;
 	const recordReceiver = async () => {
 		if (receipts && (event.type === "task.created" || event.type === "task.reassigned")) await recordDeliveryEvidence(core, eventDetails, { stage: TaskDeliveryStage.receiverRecorded, state: TaskDeliveryEvidenceState.confirmed }, receipts);
 	};
@@ -195,28 +194,29 @@ function inboxEvent(delivery: RelayDelivery): TaskEvent {
 }
 
 /** Model insertion and wake apply; otherwise the event is archived. Throws for an unknown event type. */
-function isPresentedToModel(core: TaskCore, event: TaskEvent): boolean {
+function isPresentedToModel(core: TaskCore, event: TaskEvent, taskWorker: boolean): boolean {
 	const type = TASK_EVENT_TYPES[event.type];
 	if (type === undefined) throw new TaskProtocolError("UNKNOWN_EVENT", `unknown task inbox event type: ${event.type}`);
-	return type.visible && !core.isSelfAuthoredConversation(event) && !isOriginProgress(core, event);
+	if (!type.visible || core.isSelfAuthoredConversation(event)) return false;
+	if (event.type !== "task.information" && event.type !== "task.answer") return true;
+	const task = core.getTask(event.taskId);
+	if (!task) return true;
+	if (isLocalOrigin(core, task)) return event.type !== "task.information";
+	if (!taskWorker || task.terminalDelivery.state !== "accepted") return true;
+	// Accepted closes this worker's gate, even before the canonical terminal returns. Archive
+	// earlier correspondence only; messages sequenced after a terminal remain visible.
+	const first = task.events.find(e => e.eventId === event.eventId || TASK_EVENT_TYPES[e.type]?.terminal);
+	return first?.eventId !== event.eventId;
 }
 
-/**
- * Worker progress at the origin is inspection-only (task status and the archive record): only a question,
- * a terminal outcome or a timeout needs the parent model. An unknown task fails open to presentation.
- */
-function isOriginProgress(core: TaskCore, event: TaskEvent): boolean {
-	return event.type === "task.information" && isLocalOrigin(core, core.getTask(event.taskId));
-}
-
-function isLocalOrigin(core: TaskCore, task: TaskSnapshot | undefined): task is TaskSnapshot {
-	return task !== undefined && task.origin.relay === core.endpoint.relay && task.origin.id === core.endpoint.id;
+function isLocalOrigin(core: TaskCore, task: TaskSnapshot): boolean {
+	return task.origin.relay === core.endpoint.relay && task.origin.id === core.endpoint.id;
 }
 
 function hasAcknowledgedLocalOriginTerminal(core: TaskCore, event: TaskEvent): boolean {
 	if (TASK_EVENT_TYPES[event.type]?.terminal !== true) return false;
 	const task = core.getTask(event.taskId);
-	if (!isLocalOrigin(core, task)) return false;
+	if (!task || !isLocalOrigin(core, task)) return false;
 	const terminalIndex = task.events.findIndex((candidate) => candidate.eventId === event.eventId && candidate.type === event.type);
 	return terminalIndex >= 0 && task.events.slice(terminalIndex + 1).some((candidate) => candidate.type === "task.parent_acknowledged");
 }
